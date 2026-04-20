@@ -1,0 +1,9 @@
+# Project Architecture & Platform Guidelines
+1. Platform-Specific Organization: Code, documentation, and architectural designs must be strictly organized by platform. You will find or create dedicated root directories for platforms such as databricks/, snowflake/, aws/, gcp/, etc.
+2. When Creating New Solutions: Always ensure any new scripts, infrastructure-as-code, or markdown notes are placed inside their respective platform's directory rather than the root directory.
+3. Multidisciplinary Scope: Tasks in this repository will span across:
+   - Data Engineering: Data modeling, ETL/ELT pipelines, streaming, and data warehousing.
+   - Machine Learning Engineering: MLOps, model training, feature stores, and model deployment architectures.
+   - AI Engineering: Generative AI integration, RAG architectures, LLM orchestration, and vector databases.
+4. Architectural Best Practices: When providing code or architecture blueprints, prioritize scalable, secure, and production-ready best practices suitable for modern enterprise data solutions.
+5. Small Screen Optimization: Format all generated code, text, diagrams, and documentation to look good and be easily readable on small-screen devices (7 to 8-inch e-ink screens like the BOOX Tab Mini). Limit line width, avoid excessively long single lines of code/text, and use concise, well-structured blocks.

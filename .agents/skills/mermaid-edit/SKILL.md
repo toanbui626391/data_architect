@@ -1,27 +1,24 @@
 ---
 name: mermaid-edit
-description: Use this skill to write or edit Mermaid diagrams in markdown files. It ensures compatibility with the "Markdown Preview Mermaid Support" extension.
+description: Use this skill to write or edit Mermaid diagrams in markdown files. It ensures compatibility with VS Code's built-in Markdown preview.
 ---
 
 # Mermaid Edit Skill
 
 **Agent Context & Tooling:**
-The user relies on the "Markdown Preview Mermaid Support" extension in their IDE to preview Mermaid diagrams embedded in markdown files. This extension (like many offline or bundled previewers) typically uses a slightly older or highly stable bundled version of the Mermaid.js library (e.g., v9.x or v10.x).
+The user relies on the built-in VS Code Markdown preview to render Mermaid diagrams embedded in markdown files. This native integration uses a modern version of Mermaid, supporting contemporary features and syntax.
 
 **Instructions for Mermaid Editing:**
 
-1. **Avoid Experimental Syntax:**
-   - **Do NOT** use experimental or bleeding-edge diagram types like `architecture-beta`.
-   - When asked to create an architecture diagram, **ALWAYS** use standard `flowchart TD` or `flowchart LR` combined with `subgraph` blocks to visually organize components into planes, networks, and environments.
+1. **Modern Syntax is Supported:**
+   - You can use modern features like connecting edges directly to or from subgraphs (e.g., `SubgraphID --> Node`).
+   - Use standard `flowchart TD` or `flowchart LR` (or `graph TD` / `graph LR`) combined with `subgraph` blocks to visually organize components into planes, networks, and environments.
+   - Define subgraph titles using the square bracket syntax: `subgraph ID [Title with Spaces & Characters]`.
 
 2. **Syntax Compatibility & Best Practices:**
-   - **Node Labels with Special Characters:** If a node label contains HTML tags (like `<br>`), spaces, or special characters (like `&`, `/`), you **MUST** enclose the label in double quotes. 
-     - *Correct:* `IdP["Enterprise IdP <br> Okta / Entra ID"]`
-     - *Incorrect:* `IdP[Enterprise IdP <br> Okta / Entra ID]`
-   - **Subgraph Declarations:** Subgraph IDs must be simple alphanumeric strings without spaces or special characters. Always define the title separately using square brackets.
-     - *Correct:* `subgraph IdentityAccess [Enterprise Identity & Access]`
-     - *Incorrect:* `subgraph Enterprise Identity & Access`
-   - **Edge Definitions:** Avoid putting complex text directly on edges without quotes if they contain unusual characters. Standard pipes are fine: `-->|Action|`.
+   - **Special Characters in Nodes:** If a node label contains parentheses or other potentially conflicting characters, it is highly recommended to use HTML entities (e.g., `&#40;` for `(` and `&#41;` for `)`) to prevent parser confusion.
+     - *Correct:* `Event[Event Notification <br>&#40;SQS/EventGrid/PubSub&#41;]`
+   - **Avoid Bleeding-Edge Syntax:** While the parser is modern, avoid highly experimental or beta diagram types (e.g., `architecture-beta`) unless explicitly requested or verified.
 
 3. **Small Screen Optimization:**
    - Per the project's architectural guidelines (`.clinerules`), diagrams should be optimized for small screens (e-ink readers). 
@@ -29,4 +26,4 @@ The user relies on the "Markdown Preview Mermaid Support" extension in their IDE
    - Use `direction TB` inside subgraphs when using a `flowchart LR` parent diagram to keep horizontal scrolling to a minimum.
    - Limit the length of text labels.
 
-**Goal:** Ensure 100% rendering success across standard markdown preview extensions without causing parser crashes or syntax errors.
+**Goal:** Provide clear, modern, and natively compatible Mermaid diagrams optimized for VS Code's built-in preview.

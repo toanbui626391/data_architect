@@ -36,7 +36,7 @@ To design a robust enterprise-grade solution in Databricks, the architecture mus
 The following diagrams illustrate the Enterprise Governance and Security Architecture in Databricks, highlighting the separation between the Control Plane and the Customer Data Plane, Unity Catalog integration, and security boundaries.
 
 ```mermaid
-flowchart LR
+graph LR
     IdP[Identity Provider]
 
     subgraph ControlPlane [Databricks Control Plane]
@@ -73,14 +73,14 @@ flowchart LR
 ```mermaid
 graph TD
     subgraph IdentityAccess [Enterprise Identity & Access]
-        IdP["Enterprise IdP <br> Okta / Entra ID"] -->|SAML/SCIM| DB_Workspace
+        IdP[Enterprise IdP <br> Okta / Entra ID] -->|SAML/SCIM| DB_Workspace
         IdP -->|Groups & Users| UC_Metastore
     end
 
     subgraph ControlPlane [Databricks Control Plane]
-        DB_Workspace["Workspace Web App & API"]
-        UC_Metastore[("Unity Catalog Metastore")]
-        AuditLog["Audit Logging Service"]
+        DB_Workspace[Workspace Web App & API]
+        UC_Metastore[(Unity Catalog Metastore)]
+        AuditLog[Audit Logging Service]
         DB_Workspace --> AuditLog
         UC_Metastore --> AuditLog
     end
@@ -88,20 +88,20 @@ graph TD
     subgraph CustomerDataPlane [Enterprise Cloud Environment - Customer Data Plane]
         subgraph VNet_VPC [Private Network / VPC / VNet]
             direction LR
-            Clusters["Databricks Clusters <br> Secure Cluster Connectivity"]
-            Serverless["Serverless SQL Warehouses"]
+            Clusters[Databricks Clusters <br> Secure Cluster Connectivity]
+            Serverless[Serverless SQL Warehouses]
         end
         
         subgraph Storage_KMS [Cloud Storage & KMS]
-            DataLake[("Data Lake Storage <br> S3 / ADLS")]
-            KMS["Key Management Service <br> CMK"]
+            DataLake[(Data Lake Storage <br> S3 / ADLS)]
+            KMS[Key Management Service <br> CMK]
             KMS -->|Encrypts| DataLake
             KMS -->|Encrypts| Clusters
         end
         
         subgraph Security_Monitoring [Security & Monitoring]
-            SIEM["Enterprise SIEM <br> Splunk / Sentinel"]
-            Firewall["Egress Firewall / Proxy"]
+            SIEM[Enterprise SIEM <br> Splunk / Sentinel]
+            Firewall[Egress Firewall / Proxy]
         end
     end
 

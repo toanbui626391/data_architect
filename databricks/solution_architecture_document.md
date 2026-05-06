@@ -32,27 +32,27 @@ The following diagram illustrates how the Data Warehouse sits between upstream s
 ```mermaid
 graph TD
     %% Upstream Sources
-    subgraph Sources ["Upstream Data Sources"]
-        ERP["ERP Systems (e.g., SAP, Oracle)"]
-        CRM["CRM Systems (e.g., Salesforce)"]
-        Streaming["Event Streams (e.g., Kafka)"]
+    subgraph Sources [Upstream Data Sources]
+        ERP[ERP Systems (e.g., SAP, Oracle)]
+        CRM[CRM Systems (e.g., Salesforce)]
+        Streaming[Event Streams (e.g., Kafka)]
     end
 
     %% Central Data Platform
-    subgraph DataPlatform ["Databricks Data Intelligence Platform"]
-        Storage["Delta Lake (S3/ADLS/GCS)"]
-        UC["Unity Catalog (Governance)"]
-        Compute["Databricks Compute (DLT / Serverless SQL)"]
+    subgraph DataPlatform [Databricks Data Intelligence Platform]
+        Storage[Delta Lake (S3/ADLS/GCS)]
+        UC[Unity Catalog (Governance)]
+        Compute[Databricks Compute (DLT / Serverless SQL)]
         
         Storage <--> Compute
         Compute -.-> UC
     end
 
     %% Downstream Consumers
-    subgraph Consumers ["Downstream Consuming Systems"]
-        BI["Analytics & BI Tools (PowerBI, Tableau)"]
-        API1["Customer Facing App (Microservice)"]
-        API2["Internal Ops Dashboard API"]
+    subgraph Consumers [Downstream Consuming Systems]
+        BI[Analytics & BI Tools (PowerBI, Tableau)]
+        API1[Customer Facing App (Microservice)]
+        API2[Internal Ops Dashboard API]
     end
 
     %% Relationships
@@ -95,27 +95,27 @@ For downstream applications requiring low-latency (e.g., < 50ms) point lookups o
 
 ```mermaid
 graph TD
-    subgraph GoldLayer ["Gold Layer (Delta Lake)"]
-        Fact1["Fact_Sales"]
-        Dim1["Dim_Customer"]
-        Agg1["Agg_Customer_360"]
+    subgraph GoldLayer [Gold Layer (Delta Lake)]
+        Fact1[Fact_Sales]
+        Dim1[Dim_Customer]
+        Agg1[Agg_Customer_360]
     end
 
-    subgraph ServingCompute ["Serving & Compute Layer"]
-        DBSQL["Databricks SQL Serverless (OLAP)"]
-        Lakebase[("Lakebase / Synced Tables (PostgreSQL)")]
-        Lakeflow[["Lakeflow Sync Pipeline"]]
+    subgraph ServingCompute [Serving & Compute Layer]
+        DBSQL[Databricks SQL Serverless (OLAP)]
+        Lakebase[(Lakebase / Synced Tables (PostgreSQL))]
+        Lakeflow[[Lakeflow Sync Pipeline]]
         
         GoldLayer -->|Queried by| DBSQL
         GoldLayer -->|Synced via| Lakeflow
         Lakeflow -->|Writes to| Lakebase
     end
 
-    subgraph Consumers ["Consumers"]
-        BI["BI Tools (PowerBI)"]
-        AppSvc["App Microservice (Node/Java)"]
-        APIGW["API Gateway"]
-        ClientApp["End-User Application"]
+    subgraph Consumers [Consumers]
+        BI[BI Tools (PowerBI)]
+        AppSvc[App Microservice (Node/Java)]
+        APIGW[API Gateway]
+        ClientApp[End-User Application]
     end
 
     %% Analytics Flow

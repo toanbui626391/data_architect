@@ -62,23 +62,21 @@ When designing the serving layer, it is critical to differentiate between BI wor
 ## 3. Architecture Diagram
 
 ```mermaid
-flowchart LR
+graph LR
     %% External Sources
     subgraph ExternalSources [External Data Sources]
-        direction TB
         CloudStorage[(Cloud Storage <br> S3/ADLS)]
-        SaaS["Enterprise SaaS <br> Salesforce/ERP"]
+        SaaS[Enterprise SaaS <br> Salesforce/ERP]
     end
 
     %% Ingestion
     subgraph Ingestion [Ingestion Layer]
-        AutoLoader["Serverless Auto Loader"]
-        LakeFlow["LakeFlow Connect"]
+        AutoLoader[Serverless Auto Loader]
+        LakeFlow[LakeFlow Connect]
     end
 
     %% Transformation (DLT)
     subgraph Transformation [Serverless Delta Live Tables]
-        direction TB
         Bronze[(Bronze <br> Raw)]
         Silver[(Silver <br> Cleansed)]
         Gold[(Gold <br> Aggregates)]
@@ -89,11 +87,10 @@ flowchart LR
     
     %% Serving & APIs
     subgraph Serving [Serving & API Layer]
-        direction TB
-        ServerlessSQL["Serverless SQL Warehouse"]
-        Lakeview["Lakeview / AI/BI Dashboards"]
-        SQL_API["SQL Statement API (Bulk)"]
-        OnlineTables["Online Tables (Low-Latency)"]
+        ServerlessSQL[Serverless SQL Warehouse]
+        Lakeview[Lakeview / AI/BI Dashboards]
+        SQL_API[SQL Statement API (Bulk)]
+        OnlineTables[Online Tables (Low-Latency)]
         
         ServerlessSQL --> Lakeview
         ServerlessSQL --> SQL_API
@@ -110,9 +107,9 @@ flowchart LR
     Gold --> OnlineTables
     
     %% External Consumers
-    ExternalApp["External Enterprise Apps"]
-    OperationalApp["Operational Microservices"]
-    BusinessUser["Business Users"]
+    ExternalApp[External Enterprise Apps]
+    OperationalApp[Operational Microservices]
+    BusinessUser[Business Users]
     
     SQL_API --> ExternalApp
     OnlineTables --> OperationalApp

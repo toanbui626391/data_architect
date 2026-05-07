@@ -23,38 +23,45 @@ The following diagram maps how the Gold layer in BigQuery is distributed to diff
 
 ```mermaid
 flowchart TD
-    subgraph BigQuery Data Warehouse
-        Gold["Gold Layer\n(Dimensional Models / Facts & Dims)"]
-        BI_Engine["BI Engine (In-Memory Cache)"]
-        AuthViews["Authorized Views"]
+    subgraph BQ [BigQuery Data Warehouse]
+        Gold[Gold Layer<br>&#40;Dimensional Models / Facts & Dims&#41;]
+        BI_Engine[BI Engine &#40;In-Memory Cache&#41;]
+        AuthViews[Authorized Views]
         
         Gold --> AuthViews
         AuthViews -.-> BI_Engine
     end
 
-    subgraph BI & Analytics
-        Looker["Looker / Looker Studio"]
+    subgraph BILayer [BI & Analytics]
+        Looker[Looker &#40;Enterprise Semantic Layer&#41;]
+        LookerStudio[Looker Studio &#40;Self-Service&#41;]
+        Sheets[Connected Sheets]
         BI_Engine -->|Sub-second SQL| Looker
+        BI_Engine -->|Sub-second SQL| LookerStudio
+        AuthViews --> Sheets
     end
 
-    subgraph AI & Machine Learning
-        BQML["BigQuery ML (In-DB Training/Inference)"]
-        Vertex["Vertex AI (Feature Store / LLMs)"]
+    subgraph AILayer [AI & Machine Learning]
+        BQML[BigQuery ML &#40;In-DB Training/Inference&#41;]
+        Vertex[Vertex AI &#40;Feature Store / LLMs&#41;]
         
         AuthViews --> BQML
         AuthViews <-->|Direct SQL Integration| Vertex
     end
 
-    subgraph Application & API Serving
-        Dataflow["Reverse-ETL (Dataflow / Cloud Run)"]
-        CloudSQL["Cloud SQL (Relational)"]
-        Firestore["Firestore (NoSQL/Document)"]
-        API["Customer Facing APIs / Microservices"]
+    subgraph AppLayer [Application & API Serving]
+        Dataflow[Reverse-ETL &#40;Dataflow / Cloud Run&#41;]
+        CloudSQL[Cloud SQL &#40;Relational&#41;]
+        AlloyDB[AlloyDB &#40;High-Perf Relational&#41;]
+        Firestore[Firestore &#40;NoSQL/Document&#41;]
+        API[Customer Facing APIs / Microservices]
         
         AuthViews --> Dataflow
         Dataflow -->|Syncs Aggregates| CloudSQL
+        Dataflow -->|Syncs Aggregates| AlloyDB
         Dataflow -->|Syncs Documents| Firestore
         CloudSQL --> API
+        AlloyDB --> API
         Firestore --> API
     end
 ```
@@ -64,16 +71,45 @@ flowchart TD
 ## 4. Serving Patterns
 
 ### 4.1 Pattern 1: Business Intelligence (BI) & Reporting
-This pattern serves dashboards, automated reports, and self-service analytics for business users.
+This pattern serves dashboards, automated reports, and self-service analytics
+for business users. GCP provides two distinct native BI tools — choose based
+on the user persona and governance requirements.
 
-*   **Native Integration:** **Looker** or **Looker Studio** connects directly to the BigQuery Gold layer. LookML is used to define the semantic layer on top of our Kimball dimensions and facts.
-*   **Performance Acceleration:** We enable **BigQuery BI Engine**. This natively caches frequently accessed data in-memory within BigQuery's infrastructure.
-*   **When to Use:** Use this pattern for all internal dashboards, executive reporting, and self-service data exploration.
-*   **Pros:** 
-    *   No data extraction required; data remains secure in BigQuery.
-    *   BI Engine provides sub-second query response times without manually building aggregate tables.
-*   **Cons:** 
-    *   Requires careful LookML modeling to prevent analysts from accidentally running excessively expensive unstructured queries.
+#### Looker (Enterprise Governed Reporting)
+*   **Use Case:** Executive reporting, governed company-wide KPIs, embedded
+    analytics. Requires a Looker license.
+*   **How it Works:** Looker connects to BigQuery and uses **LookML** to define
+    a semantic layer (metrics, joins, access filters) on top of the Kimball
+    Gold layer. This prevents analysts from writing ad-hoc SQL that bypasses
+    business logic or incurs unexpected costs.
+
+#### Looker Studio (Self-Service Exploration)
+*   **Use Case:** Ad-hoc dashboards, quick visualisations, free self-service
+    exploration for non-technical business users.
+*   **How it Works:** Looker Studio connects directly to BigQuery with no
+    semantic layer. There is no LookML — users write custom SQL or use the
+    drag-and-drop interface.
+*   **Governance Note:** Because there is no semantic layer, Looker Studio
+    access should be restricted to pre-built Authorized Views to prevent
+    expensive, unguarded full-table queries.
+
+#### BigQuery BI Engine
+*   **Performance Acceleration:** BI Engine caches frequently accessed Gold
+    layer data in-memory to deliver sub-second query responses for both
+    Looker and Looker Studio.
+*   **Cost Note:** BI Engine is **not free**. It requires purchasing a
+    **slot reservation** (billed in GB of RAM per hour). Reservations must
+    be sized to the hot data being cached. It accelerates structured
+    filter/aggregation queries well but does not accelerate all query types
+    equally.
+
+*   **When to Use:** Use Looker for all governed, business-critical dashboards.
+    Use Looker Studio for analyst self-service. Enable BI Engine for
+    frequently executed dashboard queries.
+*   **Cons:**
+    *   Looker requires LookML expertise and licensing investment.
+    *   Looker Studio has no guardrails; unmanaged access can generate
+        unexpected query costs.
 
 ### 4.2 Pattern 2: Machine Learning (Predictive Analytics)
 This pattern serves Data Scientists building predictive models (churn, LTV, recommendations).
@@ -87,25 +123,72 @@ This pattern serves Data Scientists building predictive models (churn, LTV, reco
 *   **Cons:**
     *   BQML is not suited for complex computer vision or unstructured audio processing.
 
-### 4.3 Pattern 3: Generative AI (LLMs)
+### 4.3 Pattern 3: Generative AI (LLMs & Vector Search)
 This pattern brings GenAI capabilities directly to the warehouse data.
 
-*   **Integration:** BigQuery natively integrates with Vertex AI Foundation Models (e.g., Gemini). Using the `ML.GENERATE_TEXT` SQL function, we can pass BigQuery data as context to an LLM without writing external Python scripts.
-*   **Vector Search:** BigQuery supports native vector indexes and `VECTOR_SEARCH` functions, allowing us to build Retrieval-Augmented Generation (RAG) architectures entirely within the warehouse using SQL.
-*   **When to Use:** Use this for sentiment analysis on text columns, extracting entities from free-form text, or building semantic search over structured catalogs.
-*   **Pros:** Massive simplification of GenAI architectures by avoiding external vector databases and complex orchestration.
+*   **Integration:** BigQuery natively integrates with Vertex AI Foundation
+    Models (e.g., Gemini) via the `ML.GENERATE_TEXT` SQL function. This lets
+    you run LLM inference directly over BigQuery rows without exporting data.
+*   **RAG Pipeline (Vector Search):** To build a Retrieval-Augmented Generation
+    (RAG) architecture natively within BigQuery:
+    1.  **Generate Embeddings:** A Dataform script calls
+        `ML.GENERATE_EMBEDDING` (using a Vertex AI embedding model) over the
+        source text column (e.g., product descriptions in a Silver table).
+        The resulting embedding vectors are stored in a dedicated
+        `embeddings` table in the Gold layer.
+    2.  **Create Vector Index:** A `CREATE VECTOR INDEX` is defined on the
+        embedding column of that table.
+    3.  **Retrieve at Query Time:** The application passes a user query
+        through `ML.GENERATE_EMBEDDING`, then calls `VECTOR_SEARCH` to find
+        the top-K semantically similar records. These records are passed as
+        context to `ML.GENERATE_TEXT` to produce a grounded LLM response.
+*   **When to Use:** Use this for sentiment analysis on text columns,
+    extracting entities from free-form text, or building semantic search
+    over structured product/content catalogs.
+*   **Pros:** Avoids external vector databases (e.g., Pinecone, Weaviate)
+    and complex orchestration — the entire RAG pipeline runs in SQL.
 
 ### 4.4 Pattern 4: Application & API Serving
-This pattern serves high-concurrency, user-facing applications (e.g., displaying a user's purchase history on a mobile app).
+This pattern serves high-concurrency, user-facing applications
+&#40;e.g., displaying a user's purchase history on a mobile app&#41;.
 
-*   **The Architecture:** BigQuery is **not** used to serve the API directly. Instead, we use a "Reverse-ETL" pattern. A scheduled Dataflow job or Cloud Run service queries the aggregated Gold layer and syncs the results into a high-performance operational database.
+*   **The Architecture:** BigQuery is **not** used to serve the API directly.
+    Instead, we use a "Reverse-ETL" pattern. A scheduled Dataflow job or
+    Cloud Run service queries the aggregated Gold layer and syncs the results
+    into a high-performance operational database.
 *   **Native Targets:**
     *   **Firestore:** For serving JSON documents to web/mobile apps.
-    *   **Cloud SQL / AlloyDB:** For relational serving.
-    *   **Bigtable:** For ultra-high throughput, single-digit millisecond reads (e.g., ad-tech, personalization engines).
-*   **When to Use:** Use this pattern for any customer-facing application, microservice, or API that requires thousands of queries per second (QPS) at low latency.
-*   **Pros:** Decouples the analytical engine from the operational application, preventing analytical queries from impacting application uptime.
-*   **Cons:** Introduces data latency (data in the app is only as fresh as the last sync) and requires managing an additional database system.
+    *   **Cloud SQL:** For standard relational serving (PostgreSQL-compatible).
+    *   **AlloyDB:** For high-performance relational serving requiring
+        significantly higher throughput or analytical SQL alongside OLTP
+        queries (PostgreSQL-compatible, columnar engine built-in).
+    *   **Bigtable:** For ultra-high throughput, single-digit millisecond
+        reads (e.g., ad-tech, personalization engines, IoT time-series).
+*   **When to Use:** Use for any customer-facing application, microservice,
+    or API requiring thousands of QPS at low latency.
+*   **Pros:** Decouples the analytical engine from the operational application,
+    preventing analytical queries from impacting application uptime.
+*   **Cons:** Introduces data latency (data is only as fresh as the last sync)
+    and requires managing an additional database system.
+
+### 4.5 Pattern 5: Self-Service via Connected Sheets
+For business analysts who work primarily in Google Sheets, **BigQuery
+Connected Sheets** provides a zero-infrastructure native serving pattern.
+
+*   **How it Works:** Users connect a Google Sheet directly to a BigQuery
+    table or Authorized View. They can then pivot, filter, and chart up to
+    10 billion rows of BigQuery data without writing SQL or exporting CSVs.
+    All queries execute serverlessly against BigQuery; no data is permanently
+    copied into the Sheet.
+*   **When to Use:** Use for operations teams, finance analysts, or business
+    stakeholders who need BigQuery data in a familiar spreadsheet interface
+    without requiring BI tool access or SQL knowledge.
+*   **Pros:**
+    *   Completely native GCP — no additional tools or licenses required.
+    *   Data stays in BigQuery; IAM controls still apply.
+*   **Cons:**
+    *   Not suitable for real-time dashboards or high-frequency refreshes.
+    *   Best for exploratory analysis rather than production reporting.
 
 ---
 

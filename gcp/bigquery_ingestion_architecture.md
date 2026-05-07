@@ -23,34 +23,31 @@ The following diagram illustrates the high-level flow of data from source system
 
 ```mermaid
 flowchart TD
-    subgraph Upstream Data Sources
-        DB["Operational Databases"]
-        App["Application Logs"]
-        SaaS["External APIs / SaaS"]
+    subgraph Sources [Upstream Data Sources]
+        DB[Operational Databases]
+        App[Application Logs]
+        SaaS[External APIs / SaaS]
     end
 
-    subgraph Google Cloud Ingestion Layer
-        GCS["Cloud Storage (GCS)"]
-        PubSub["Cloud Pub/Sub"]
-        DTS["Data Transfer Service"]
+    subgraph Ingestion [Google Cloud Ingestion Layer]
+        GCS[Cloud Storage &#40;GCS&#41;]
+        PubSub[Cloud Pub/Sub]
+        DTS[Data Transfer Service]
     end
 
-    subgraph BigQuery Data Warehouse
-        WriteAPI["Storage Write API"]
-        Raw["Raw / Bronze Tables"]
-        Clean["Clean / Silver Tables"]
-        Transform["Scheduled Queries / Dataform"]
+    subgraph BQ [BigQuery Data Warehouse]
+        WriteAPI[Storage Write API]
+        Raw[Raw / Bronze Tables]
         
         WriteAPI --> Raw
         DTS --> Raw
         PubSub -->|Direct Subscription| Raw
         GCS -->|Load Job / External Table| Raw
-        
-        Raw --> Transform
-        Transform --> Clean
+        Datastream -->|Direct CDC Stream| Raw
     end
 
-    DB -->|Datastream / Extract| GCS
+    DB -->|Batch Extract| GCS
+    DB -->|CDC via Datastream| Datastream
     App -->|Stream| PubSub
     App -->|Direct RPC| WriteAPI
     SaaS --> DTS
@@ -65,13 +62,21 @@ For low-latency, high-volume streaming, we bypass intermediary storage and write
 
 *   **How it Works:** Applications or microservices use the BigQuery Storage Write API via gRPC to stream records directly into BigQuery tables.
 *   **When to Use:** Use this pattern when you require sub-second latency for real-time analytics, when processing high-velocity event streams, or when capturing continuous application telemetry where batch delays are unacceptable.
+*   **Stream Types & Delivery Semantics:**
+    *   **Default stream:** At-least-once semantics. Simpler to implement but
+        may produce duplicates under retry; deduplication is required downstream.
+    *   **Committed stream:** Exactly-once semantics. Requires the client to
+        manage stream offsets and explicitly call `finalizeWriteStream`. This
+        is the recommended type for financial or critical event data.
+    *   **Buffered stream:** Exactly-once with application-controlled commit
+        points, useful when batching rows before flushing.
 *   **Pros:**
     *   Delivers ultra-low latency (near real-time).
-    *   The default stream provides exactly-once delivery semantics, automatically handling retries.
-    *   Simplifies client-side logic by removing the need for intermediary message queues.
+    *   Committed stream eliminates the need for complex downstream deduplication.
+    *   Simplifies architecture by removing the need for intermediary queues.
 *   **Cons:**
-    *   Requires writing custom application code (SDKs) to interface with the gRPC API.
-    *   Higher cost per GB compared to standard batch loading from Cloud Storage.
+    *   Requires writing custom application code (SDKs) via gRPC.
+    *   Higher cost per GB compared to standard batch loading from GCS.
 
 ### 4.2 Pattern 2: Event-Driven File Loading (Cloud Storage)
 For batch exports or file drops, we use Cloud Storage coupled with native BigQuery load jobs.
@@ -93,12 +98,37 @@ GCP provides several "zero-ETL" paths that require merely configuration, no code
 *   **BigQuery Data Transfer Service (DTS):** Used for SaaS applications (e.g., Google Ads, Salesforce) or automated scheduled transfers from GCS or Amazon S3.
 *   **When to Use:** Use this pattern whenever connecting to supported Google or third-party SaaS products, or when streaming simple messages directly from a Pub/Sub topic without needing prior transformation.
 *   **Pros:**
-    *   Completely fully managed and requires zero code to implement.
+    *   Fully managed and requires zero code to implement.
     *   DTS handles scheduling, retries, and API rate limits automatically.
     *   Extremely fast time-to-value for supported native integrations.
 *   **Cons:**
     *   Limited strictly to the pre-built connectors and features provided by Google.
     *   Provides zero flexibility for pre-processing, filtering, or complex transformations before the data lands in BigQuery.
+
+### 4.4 Pattern 4: Change Data Capture (Datastream)
+For operational databases (MySQL, PostgreSQL, Oracle, SQL Server) that require
+near-real-time replication into BigQuery, we use **Datastream**, GCP's native
+CDC service.
+
+*   **How it Works:** Datastream connects to the source database's transaction
+    log (e.g., MySQL binlog, PostgreSQL logical replication). It continuously
+    captures row-level `INSERT`, `UPDATE`, and `DELETE` events and streams them
+    **directly into BigQuery** (no GCS staging required), maintaining a
+    continuously updated replica of the source table.
+*   **When to Use:** Use this pattern when you need near-real-time replication
+    of an entire operational database schema, or when you require full CDC
+    history (inserts, updates, deletes) rather than simple append-only snapshots.
+*   **Pros:**
+    *   Native GCP service — no custom Debezium connectors or Kafka clusters
+        to operate.
+    *   Writes directly to BigQuery, minimising latency and infrastructure.
+    *   Automatically handles schema evolution from the source.
+*   **Cons:**
+    *   Requires network access to the source database and proper IAM/VPC
+        configuration.
+    *   The BigQuery destination table is append-only (CDC log format);
+        a downstream Dataform model is needed to materialise the latest
+        state of each row.
 
 ---
 
@@ -106,21 +136,25 @@ GCP provides several "zero-ETL" paths that require merely configuration, no code
 
 Maintaining state natively reduces pipeline fragility.
 
-*   **Exactly-Once Streaming:** When using the Storage Write API's default stream, GCP guarantees exactly-once semantics, eliminating the need for complex deduplication logic in the raw layer.
-*   **Append-Only Raw Tables:** For file loads or direct Pub/Sub ingestion, the Raw tables are append-only. We intentionally do not perform updates or deletes during ingestion.
-*   **Deduplication via SQL:** Idempotency is enforced downstream. If duplicate records arrive in the Raw table, the subsequent transformation step uses a `MERGE` statement or a `QUALIFY ROW_NUMBER() OVER (...) = 1` query to filter them out before writing to the Clean/Silver tables.
+*   **Exactly-Once Streaming:** Exactly-once guarantees require the Storage
+    Write API **Committed stream** type. The Default stream is at-least-once
+    and may produce duplicates on retry. See Pattern 1 for stream type details.
+*   **Append-Only Raw Tables:** For file loads, Pub/Sub, and Datastream
+    ingestion, the Raw (Bronze) tables are append-only. No updates or deletes
+    are performed during ingestion — the raw layer is an immutable audit log.
+*   **Deduplication via SQL:** For non-Committed streams, idempotency is
+    enforced in the downstream transformation layer. The Dataform Silver models
+    use `QUALIFY ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _ingested_at DESC)
+    = 1` or a `MERGE` statement to deduplicate before writing to Silver tables.
 
 ---
 
-## 6. Data Transformation & Orchestration (Native)
+## 6. Downstream Transformation
 
-Once data lands in the Raw layer, we utilize native tools for transformations.
-
-### 6.1 Scheduled Queries (Simple Workloads)
-For straightforward data models, we use BigQuery Scheduled Queries. These are standard SQL scripts that run on a cron schedule natively within BigQuery. They are perfect for simple `MERGE` statements moving data from Raw to Clean.
-
-### 6.2 Dataform (Complex Workloads)
-For complex, multi-step dependency graphs, we utilize **Dataform** (now natively integrated into GCP). Dataform allows data engineers to write SQLX to manage dependencies, assertions, and environments, all executed serverlessly within BigQuery.
+This document covers ingestion only — data is landed in the **Bronze (Raw)**
+layer and is not modified further here. All Bronze → Silver → Gold
+transformation logic is defined in the companion document:
+**`bigquery_transformation_architecture.md`**.
 
 ---
 

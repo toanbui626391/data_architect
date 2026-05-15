@@ -6,21 +6,20 @@ Based on `epm_solution_design.md`
 
 ## Overview
 
-| Phase | Focus | Duration |
-|:---:|:---|:---|
-| 1 | Foundation & Prerequisites | Weeks 1–2 |
-| 2 | Dimension & Master Data Build | Weeks 3–5 |
-| 3 | PBCS Planning Application | Weeks 6–9 |
-| 4 | FCCS Consolidation Setup | Weeks 8–11 |
-| 5 | Integration (FDMEE) | Weeks 10–13 |
-| 6 | DWH Connection | Weeks 13–15 |
-| 7 | Reporting & UAT | Weeks 14–17 |
-| 8 | Go-Live & Hypercare | Week 18 |
+| Phase | Focus |
+|:---:|:---|
+| 1 | Foundation & Prerequisites |
+| 2 | Dimension & Master Data Build |
+| 3 | PBCS Planning Application |
+| 4 | FCCS Consolidation Setup |
+| 5 | Integration (FDMEE) |
+| 6 | DWH Connection |
+| 7 | Reporting & UAT |
+| 8 | Go-Live & Hypercare |
 
 ---
 
 ## Phase 1 — Foundation & Prerequisites
-### Weeks 1–2
 
 - [ ] **1.1 Provision Oracle EPM Cloud tenant**
   - Order PBCS + FCCS + Narrative Reporting licenses
@@ -48,7 +47,6 @@ Based on `epm_solution_design.md`
 ---
 
 ## Phase 2 — Dimension & Master Data Build
-### Weeks 3–5
 
 - [ ] **2.1 Build Account dimension**
   - Map ERP Chart of Accounts to EPM account hierarchy
@@ -97,7 +95,6 @@ Based on `epm_solution_design.md`
 ---
 
 ## Phase 3 — PBCS Planning Application
-### Weeks 6–9
 
 - [ ] **3.1 Create planning application in PBCS**
   - Application type: Custom
@@ -148,7 +145,6 @@ Based on `epm_solution_design.md`
 ---
 
 ## Phase 4 — FCCS Consolidation Setup
-### Weeks 8–11
 
 *(Runs in parallel with Phase 3)*
 
@@ -188,7 +184,6 @@ Based on `epm_solution_design.md`
 ---
 
 ## Phase 5 — FDMEE Integration
-### Weeks 10–13
 
 - [ ] **5.1 Set up FDMEE source systems**
   - Register Oracle Fusion ERP as source
@@ -228,7 +223,6 @@ Based on `epm_solution_design.md`
 ---
 
 ## Phase 6 — DWH Connection (Oracle ADW)
-### Weeks 13–15
 
 - [ ] **6.1 Create staging tables**
   - `STG_EPM_PLANNING` for Budget/Forecast
@@ -268,7 +262,6 @@ Based on `epm_solution_design.md`
 ---
 
 ## Phase 7 — Reporting & UAT
-### Weeks 14–17
 
 - [ ] **7.1 Build OAC semantic model**
   Define all KPI measures:
@@ -302,7 +295,6 @@ Based on `epm_solution_design.md`
 ---
 
 ## Phase 8 — Go-Live & Hypercare
-### Week 18
 
 - [ ] **8.1 Production cutover**
   - Load 12 months of historical Actuals

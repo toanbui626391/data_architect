@@ -7,3 +7,10 @@
    - AI Engineering: Generative AI integration, RAG architectures, LLM orchestration, and vector databases.
 4. Architectural Best Practices: When designing a solution or providing architecture blueprints, it MUST be specifically tailored to the target platform. Focus on simple designs that adhere to the best practices of that specific platform. Always prioritize using the platform's native solutions (rather than custom or generic third-party workarounds) to ensure the system is easy to maintain and operate, while remaining scalable, secure, and production-ready.
 5. Small Screen Optimization: Format all generated code, text, diagrams, and documentation to look good and be easily readable on small-screen devices (7 to 8-inch e-ink screens like the BOOX Tab Mini). Limit line width, avoid excessively long single lines of code/text, and use concise, well-structured blocks.
+6. Data Modeling Standard — Star Schema (MANDATORY):
+   - All data warehouse schemas in this repository MUST follow the Kimball Star Schema methodology.
+   - The Star Schema rule: Every dimension table connects DIRECTLY to a fact table. Dimension-to-dimension joins (Snowflake Schema) are STRICTLY FORBIDDEN.
+   - Denormalize dimension hierarchies into flat columns (e.g., L1_Category, L2_Category) rather than creating normalized parent-child dimension tables.
+   - Role-playing dimensions (e.g., a DimEntity used as both 'Entity' and 'TradingPartner') are permitted using aliased foreign keys on the fact table — do NOT create a separate dimension table for each role.
+   - Bridge tables for many-to-many relationships (e.g., BridgeAccountAlloc) are permitted but must NOT be referenced as a dimension directly by the fact table.
+   - When reviewing or generating any ER diagram or schema, actively check for and reject any snowflake pattern before finalizing the design.

@@ -74,6 +74,8 @@ Scenario
 ├── Actual
 │   └── [Read-only. Loaded from ERP via FDMEE]
 ├── Budget
+│   ├── FY2025_Target         [Top-down guidance locked by CFO]
+│   ├── FY2025_Working        [Bottom-up input from BUs]
 │   └── FY2025_Budget         [Locked after board approval]
 ├── Forecast
 │   ├── FY2025_Q1_3x9         [Superseded]
@@ -186,6 +188,8 @@ flowchart LR
         VOL["Sales Volume\n# of units"]
         PRC["Average Price\nper unit"]
         GM["Gross Margin %"]
+        DSO["Days Sales Outstanding\n(AR Days)"]
+        DPO["Days Payable Outstanding\n(AP Days)"]
     end
 
     subgraph Calc ["EPM Calculated Amounts"]
@@ -193,6 +197,9 @@ flowchart LR
         REV["Revenue\n= Volume × Price"]
         COGS["COGS\n= Revenue × (1 - GM%)"]
         GP["Gross Profit\n= Revenue - COGS"]
+        AR["Accounts Rec.\n= (Rev / 365) × DSO"]
+        AP["Accounts Pay.\n= (COGS / 365) × DPO"]
+        CF["Operating Cash Flow\n= Net Income + ΔAP - ΔAR"]
     end
 
     HC --> PAY
@@ -203,6 +210,12 @@ flowchart LR
     GM --> COGS
     REV --> GP
     COGS --> GP
+    REV --> AR
+    DSO --> AR
+    COGS --> AP
+    DPO --> AP
+    AR --> CF
+    AP --> CF
 ```
 
 ### 3.2 Data Entry Forms Design
@@ -232,34 +245,84 @@ flowchart LR
 ### 3.3 Planning Calculation Scripts (Groovy / Calc Scripts)
 
 ```groovy
-// PBCS Business Rule: Calculate P&L from Drivers
+// PBCS Business Rule: Calculate P&L & Cash Flow from Drivers
 // Runs after any driver input is saved
 
-FIX("Budget", @CUR("FY2025"))
+FIX("Budget", "Working", @CUR("FY2025"))
+    // 1. P&L Calculations
     "Payroll_Cost" (
-        "Payroll_Cost" =
-            "Headcount_FTE" * "Avg_Comp_Per_HC";
+        "Payroll_Cost" = "Headcount_FTE" * "Avg_Comp_Per_HC";
     )
     "Revenue" (
-        "Revenue" =
-            "Sales_Volume" * "Avg_Selling_Price";
+        "Revenue" = "Sales_Volume" * "Avg_Selling_Price";
     )
     "COGS" (
-        "COGS" =
-            "Revenue" * (1 - "Gross_Margin_Pct" / 100);
+        "COGS" = "Revenue" * (1 - "Gross_Margin_Pct" / 100);
     )
     "Gross_Profit" (
         "Gross_Profit" = "Revenue" - "COGS";
     )
     "EBITDA" (
-        "EBITDA" =
-            "Gross_Profit"
-            - "Sales_Marketing_Opex"
-            - "GA_Opex"
-            - "RD_Opex";
+        "EBITDA" = "Gross_Profit" - "Sales_Marketing_Opex" - "GA_Opex" - "RD_Opex";
+    )
+
+    // 2. Balance Sheet & Cash Flow Calculations
+    "Accounts_Receivable" (
+        "Accounts_Receivable" = ("Revenue" / 30) * "Days_Sales_Outstanding";
+    )
+    "Accounts_Payable" (
+        "Accounts_Payable" = ("COGS" / 30) * "Days_Payable_Outstanding";
+    )
+    "Operating_Cash_Flow" (
+        // Simplified indirect cash flow method
+        "Operating_Cash_Flow" = "Net_Income" 
+            - ("Accounts_Receivable" - @PRIOR("Accounts_Receivable")) 
+            + ("Accounts_Payable" - @PRIOR("Accounts_Payable"));
     )
 ENDFIX
 ```
+
+### 3.4 Corporate Overhead Allocation Logic
+
+To determine true profitability per business unit, Corporate IT
+and HR expenses are allocated downwards before the final budget
+is locked.
+
+**Trigger rule:** This allocation is configured as a
+**scheduled business rule** that fires automatically whenever
+`Headcount_FTE` is saved for any entity. This ensures
+allocation amounts never go stale if headcount is revised
+after an initial run.
+
+```groovy
+// PBCS Allocation Rule: Allocate Corporate IT Cost to BUs
+// Trigger: Auto-run on Headcount_FTE change (any entity)
+// Driver: Headcount ratio per entity
+
+FIX("Budget", "Working", @CUR("FY2025"))
+    "IT_Allocated_In" (
+        // Calculate entity's share of total headcount
+        var HC_Ratio = "Headcount_FTE" / "Headcount_FTE"->"Global_Group";
+
+        // Allocate Corporate IT expense down
+        "IT_Allocated_In" = "IT_Opex"->"Corporate_HQ" * HC_Ratio;
+    )
+
+    // Offset entry in Corporate HQ so group total is unchanged
+    "IT_Allocated_Out"->"Corporate_HQ" (
+        "IT_Allocated_Out" = -"IT_Opex"->"Corporate_HQ";
+    )
+ENDFIX
+```
+
+**Allocation Cost Centers in scope:**
+
+| Corporate Pool | Allocation Driver | Target |
+|:---|:---|:---|
+| Corporate IT | Headcount FTE | All BU entities |
+| Corporate HR | Headcount FTE | All BU entities |
+| Office & Facilities | Headcount FTE | All BU entities |
+| Legal & Compliance | Revenue % | Revenue entities only |
 
 ---
 
@@ -400,20 +463,21 @@ MONTHLY FINANCE REPORT — [Month] [Year]
 
 ```mermaid
 flowchart TD
-    A["CFO sets Budget Targets\nTop-down by Entity"] --> B
-    B["BU Managers enter drivers\nin PBCS Input Forms"] --> C
-    C["BU Manager submits\nStatus: Submitted"] --> D
-    D{"Finance Controller\nReview"}
-    D -->|Approve| E
-    D -->|Reject with comments| B
-    E["Regional CFO Review\nStatus: Under Review"] --> F
-    F{"Regional CFO\nApproval"}
-    F -->|Approve| G
-    F -->|Send back| C
-    G["Group CFO Final Review"] --> H
-    H{"Board Approval"}
-    H -->|Approve| I
-    I["Lock Budget\nStatus: Locked\nLoad to DWH"]
+    A["CFO sets Budget Targets\nVersion: Target"] --> B
+    B["BU Managers enter drivers\nVersion: Working"] --> C
+    C["Review Negotiation Gap\nTarget vs Working"] --> D
+    D["BU Manager submits\nStatus: Submitted"] --> E
+    E{"Finance Controller\nReview"}
+    E -->|Approve| F
+    E -->|Reject with comments| B
+    F["Regional CFO Review\nStatus: Under Review"] --> G
+    G{"Regional CFO\nApproval"}
+    G -->|Approve| H
+    G -->|Send back| D
+    H["Group CFO Final Review"] --> I
+    I{"Board Approval"}
+    I -->|Approve| J
+    J["Lock Budget\nVersion: Budget\nLoad to DWH"]
 ```
 
 **Workflow Status in DimVersion:**
@@ -473,3 +537,68 @@ flowchart LR
     PBCS --> NR
     FCCS --> NR
 ```
+
+---
+
+## 9. Security & Access Control
+
+EPM systems contain highly sensitive data (payroll rates, M&A models). Access must be strictly governed using **Entity-level and Cost Center-level security filters**.
+
+### 9.1 Group-Based Security Model
+
+| User Group | Entity Access | Cost Center Access | Permissions |
+|:---|:---|:---|:---|
+| **Global Finance (CFO)** | `@IDESCENDANTS("Global_Group")` (All) | All | Read / Write |
+| **APAC Controller** | `@IDESCENDANTS("APAC")` | All APAC CCs | Read / Write / Approve |
+| **Japan BU Manager** | `Japan_Operations` | `CC_Sales_Japan` | Write (Drivers only) |
+| **External Auditors** | All | All | Read-Only |
+
+### 9.2 Cell-Level Security Rules
+
+Even if a BU Manager has Write access to their Cost Center,
+they cannot edit everything:
+1. **Actuals Scenario:** All users are strictly `Read-Only`.
+2. **Calculated Cells:** Users cannot overwrite formula-derived
+   cells (e.g., they can edit `Headcount` and `Avg Salary`,
+   but the resulting `Payroll_Cost` cell is locked).
+3. **Locked Versions:** Once the CFO approves a forecast and
+   sets it to `Status = Locked`, Write access is universally
+   revoked across all user groups.
+
+### 9.3 Working Version — Cost Center Ownership Lock
+
+During the budget submission window, multiple BU Managers
+may share access to the same entity. Without locking,
+two managers could overwrite each other's inputs
+simultaneously.
+
+**Rule:** Each Cost Center is owned by exactly one user
+during the active submission window. Only the **designated
+CC Owner** has Write access to that cost center's data in
+the `Working` version. All other users are `Read-Only`
+for that CC until the owner submits.
+
+```
+Cost Center Ownership Rules:
+
+  CC_Sales_Japan
+    Owner:     Japan BU Manager
+    Status:    Open → Submitted
+    Write:     Japan BU Manager only
+    Read:      APAC Controller, Group Finance
+
+  CC_Marketing_APAC
+    Owner:     APAC Marketing Head
+    Status:    Open → Submitted
+    Write:     APAC Marketing Head only
+    Read:      APAC Controller, Group Finance
+```
+
+**Submission Window States:**
+
+| CC Status | Owner Access | Controller Access |
+|:---|:---:|:---:|
+| `Open` | Read / Write | Read-Only |
+| `Submitted` | Read-Only | Read / Approve |
+| `Approved` | Read-Only | Read-Only |
+

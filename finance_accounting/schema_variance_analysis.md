@@ -34,20 +34,25 @@ Key design decisions for multinational complexity:
 
 | Pattern | Implementation |
 |:---|:---|
-| **Three-Currency Model** | Separate measures for Transaction, Functional, Presentation |
+| **Three-Currency Model** | Transaction, Functional, Presentation amounts + 2 FX rate keys |
 | **Role-playing DimCurrency** | One table, 3 FK aliases (`Txn`, `Functional`, `Presentation`) |
 | **Role-playing DimExchangeRate** | One table, 2 FK aliases (`Txn→Func`, `Func→Present`) |
-| **Multi-country reporting** | `DimCountry` + `DimTaxJurisdiction` direct to fact |
+| **Multi-country fiscal calendars** | `DimFiscalCalendar` — entity-specific fiscal period mapping |
 | **Multi-GAAP / Parallel Ledgers** | `DimLedger` — IFRS vs. Local Statutory per entity |
 | **Matrix org reporting** | `DimProfitCenter` for Segment / Product Line reporting |
-| **Intercompany detail** | `TradingPartnerCostCenterKey` for elimination matching |
-| **Hierarchy flattening** | `L1/L2/L3` on Entity, CostCenter, Account |
+| **Intercompany eliminations** | `TradingPartnerCostCenterKey`, `Is_Eliminated`, `EliminationGroupKey` |
+| **Consolidation ownership** | `Ownership_Pct`, `Consolidation_Method` on `DimEntity` |
+| **IAS 21 rate discipline** | `Required_FX_Rate_Type` on `DimAccount` |
+| **SCD Type 2** | `Valid_From`, `Valid_To`, `Is_Current` on Entity, CostCenter, Account |
+| **Cash Flow classification** | `CashFlow_Category` on `DimAccount` |
+| **GL reconciliation** | `Posting_Side` Dr/Cr on fact table |
 | **Star Schema compliance** | Zero Dim→Dim joins. All dims connect only to fact |
 
 ```mermaid
 erDiagram
     FactFinancialVariance {
         int DateKey FK
+        int FiscalCalendarKey FK
         int AccountKey FK
         int CostCenterKey FK
         int EntityKey FK
@@ -63,14 +68,17 @@ erDiagram
         int PresentationCurrencyKey FK
         int FxRateKey_TxnToFunc FK
         int FxRateKey_FuncToPresent FK
+        int EliminationGroupKey FK
         DECIMAL_19_4 AmountTransaction
         DECIMAL_19_4 AmountFunctional
         DECIMAL_19_4 AmountPresentation
         date Transaction_Date
         date Load_Date
         string Transaction_Type
+        string Posting_Side
         string Source_Record_Id
         boolean Is_Intercompany
+        boolean Is_Eliminated
         boolean Is_Allocated
         string SourceSystem
     }
@@ -101,6 +109,8 @@ erDiagram
         string L2_Category
         string L3_Category
         smallint Sign_Multiplier
+        string Required_FX_Rate_Type
+        string CashFlow_Category
         date Valid_From
         date Valid_To
         boolean Is_Current
@@ -115,6 +125,9 @@ erDiagram
         string Department
         string CountryCode
         string Region
+        date Valid_From
+        date Valid_To
+        boolean Is_Current
     }
 
     DimEntity {
@@ -125,12 +138,18 @@ erDiagram
         string L2_Entity_Group
         string L3_Entity_Group
         string ConsolidationLevel
+        string Consolidation_Method
+        DECIMAL_5_2 Ownership_Pct
         string CountryCode
+        string FiscalCalendarCode
         string FunctionalCurrencyCode
         string PresentationCurrencyCode
         string Tax_Jurisdiction_Code
         boolean Is_Intercompany
         boolean Is_Active
+        date Valid_From
+        date Valid_To
+        boolean Is_Current
     }
 
     DimCountry {
@@ -148,6 +167,7 @@ erDiagram
         string JurisdictionCode
         string JurisdictionName
         string CountryCode
+        string Tax_Category
         string Tax_Type
         DECIMAL_19_4 Standard_Rate
         date Effective_From
@@ -214,20 +234,34 @@ erDiagram
         date EffectiveFrom
     }
 
-    %% --- Core Fact → Dimension (Star) ---
-    FactFinancialVariance ||--|| DimDate            : "DateKey"
-    FactFinancialVariance ||--|| DimAccount         : "AccountKey"
-    FactFinancialVariance ||--|| DimCostCenter      : "CostCenterKey"
-    FactFinancialVariance ||--|| DimEntity          : "EntityKey"
-    FactFinancialVariance ||--|| DimCountry         : "CountryKey"
-    FactFinancialVariance ||--|| DimTaxJurisdiction : "TaxJurisdictionKey"
-    FactFinancialVariance ||--|| DimLedger          : "LedgerKey"
-    FactFinancialVariance ||--|| DimProfitCenter    : "ProfitCenterKey"
-    FactFinancialVariance ||--|| DimVersion         : "VersionKey"
+    DimFiscalCalendar {
+        int FiscalCalendarKey PK
+        string CalendarCode
+        string CalendarName
+        date CalendarDate
+        int FiscalYear
+        int FiscalPeriod
+        string FiscalPeriodName
+        int FiscalQuarter
+        int FiscalYearEnd_Month
+        boolean Is_Period_End
+    }
 
-    %% --- Role-playing DimEntity (2 roles) ---
-    FactFinancialVariance ||--o| DimEntity    : "TradingPartnerEntityKey"
-    FactFinancialVariance ||--o| DimCostCenter: "TradingPartnerCostCenterKey"
+    %% --- Core Fact → Dimension (Star) ---
+    FactFinancialVariance ||--|| DimDate           : "DateKey"
+    FactFinancialVariance ||--|| DimFiscalCalendar : "FiscalCalendarKey"
+    FactFinancialVariance ||--|| DimAccount        : "AccountKey"
+    FactFinancialVariance ||--|| DimCostCenter     : "CostCenterKey"
+    FactFinancialVariance ||--|| DimEntity         : "EntityKey"
+    FactFinancialVariance ||--|| DimCountry        : "CountryKey"
+    FactFinancialVariance ||--|| DimTaxJurisdiction: "TaxJurisdictionKey"
+    FactFinancialVariance ||--|| DimLedger         : "LedgerKey"
+    FactFinancialVariance ||--|| DimProfitCenter   : "ProfitCenterKey"
+    FactFinancialVariance ||--|| DimVersion        : "VersionKey"
+
+    %% --- Role-playing DimEntity + DimCostCenter ---
+    FactFinancialVariance ||--o| DimEntity     : "TradingPartnerEntityKey"
+    FactFinancialVariance ||--o| DimCostCenter : "TradingPartnerCostCenterKey"
 
     %% --- Role-playing DimCurrency (3 roles) ---
     FactFinancialVariance ||--|| DimCurrency : "TxnCurrencyKey"

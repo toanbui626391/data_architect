@@ -139,9 +139,21 @@ Snowflake's native Data Metric Functions are utilized to proactively monitor dat
 *   **System DMFs:** Using functions like `NULL_COUNT`, `DUPLICATE_COUNT`, and `FRESHNESS` applied directly to Silver and Gold tables.
 *   **Automated Alerts:** DMF evaluations run automatically, and alerts are configured via Snowflake native alerts to notify the operations team via email or Slack if thresholds are breached.
 
-### 7.2 Observability and Lags
-*   **Dynamic Table Monitoring:** Operations teams monitor the `INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY` view to ensure tables are meeting their `TARGET_LAG`.
-*   **Cost Management:** We utilize `DYNAMIC_TABLE_WAREHOUSE_USAGE_HISTORY` to track the compute cost associated with maintaining the Medallion architecture.
+### 7.2 Pipeline Error Detection (Dynamic Tables)
+While Dynamic Tables abstract away task orchestration, they can still fail (e.g., due to divide-by-zero errors, upstream schema drift, or warehouse exhaustion). Relying on manual checks is an anti-pattern.
+
+We implement an automated **Pipeline Observability Pattern**:
+1.  **The Monitor:** A Snowflake Serverless Task runs on a continuous schedule (e.g., every 10 minutes).
+2.  **The Logic:** It queries the `SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY` view, explicitly filtering for `STATE = 'FAILED'` within the last evaluation window.
+3.  **The Metadata:** It extracts critical debugging context, including the `NAME` of the failed table, the `ERROR_MESSAGE`, and the `TARGET_LAG` violation.
+
+### 7.3 Automated Alert System
+When the Error Detection task identifies failures, it must immediately notify the operations team to restore the data flow.
+*   **Notification Integration:** We configure a Snowflake `NOTIFICATION INTEGRATION` securely connected to external channels (e.g., an AWS SNS topic routing to Slack/PagerDuty, or Snowflake's native Email integration).
+*   **Native Snowflake Alerts:** We deploy Snowflake `ALERT` objects to handle the routing.
+    *   *Condition:* `IF EXISTS (SELECT * FROM recent_dynamic_table_failures)`
+    *   *Action:* Triggers `SYSTEM$SEND_EMAIL(...)` or `SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(...)`, broadcasting the exact failed table and error log directly to the Data Engineering on-call channel.
+*   **Lag & Stale Data Alerts:** A secondary alert monitors the lag. If a Dynamic Table is still in a `REFRESHING` state but its `DATA_TIMESTAMP` falls behind 3x its defined `TARGET_LAG` (indicating compute starvation), a warning alert is fired before the pipeline fully crashes.
 
 ---
 

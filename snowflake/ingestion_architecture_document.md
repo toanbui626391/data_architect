@@ -1,17 +1,19 @@
-# Data Ingestion Architecture: Snowflake Native Platform
+# Data Ingestion Architecture: Batch & Micro-Batch
 
 ## 1. Executive Summary
-This document outlines the Enterprise Data Ingestion Architecture designed specifically for Snowflake. The primary objective is to establish a **simple, robust, and low-maintenance** pipeline that moves data from external source systems into the Snowflake Data Cloud.
+This document outlines the Enterprise Data Ingestion Architecture designed specifically for Snowflake **batch and micro-batch** file loads. The primary objective is to establish a **simple, robust, and low-maintenance** pipeline that moves data from external source systems into the Snowflake Data Cloud.
 
-By aggressively leveraging Snowflake's native capabilities—specifically **Snowpipe** and **Serverless Tasks/Streams**—this architecture avoids the complexity, licensing costs, and operational overhead of third-party ETL/ELT orchestrators (e.g., Airflow, Fivetran) for standard ingestion workflows.
+By aggressively leveraging Snowflake's native capabilities—specifically **Snowpipe** and **Serverless Tasks/Streams**—this architecture avoids the complexity, licensing costs, and operational overhead of third-party ETL/ELT orchestrators for standard ingestion workflows. Crucially, this document establishes the resilient patterns required to handle **Schema Evolution and Data Discrepancies** seamlessly.
+
+*(Note: For ultra-low latency sub-second ingestion, refer to the Real-Time Streaming Architecture Document).*
 
 ---
 
 ## 2. Ingestion Architectural Principles
 1.  **ELT over ETL:** Data is ingested into Snowflake in its raw, native format (JSON, Parquet, CSV). All transformations occur *after* loading, utilizing Snowflake's highly scalable compute warehouses.
 2.  **Serverless First:** We prioritize serverless features (Snowpipe, Serverless Tasks) to eliminate the need to manually manage, start, or stop virtual warehouses for background ingestion workloads.
-3.  **Event-Driven & Continuous:** Instead of rigid daily batch schedules, ingestion is triggered by cloud storage events, ensuring data freshness (near real-time) and spreading compute load evenly.
-4.  **Idempotency:** Ingestion pipelines are designed to be idempotent; re-processing the same source file will not result in duplicate records in downstream tables.
+3.  **Event-Driven & Continuous:** Instead of rigid daily batch schedules, ingestion is triggered by cloud storage events, ensuring data freshness and spreading compute load evenly.
+4.  **Idempotency & Resilience:** Ingestion pipelines are designed to be idempotent; re-processing the same source file will not result in duplicate records. Pipelines must **never fail hard** due to schema discrepancies; bad rows are quarantined while good rows are processed.
 
 ---
 
@@ -61,107 +63,149 @@ flowchart TD
 
 ---
 
-## 4. Core Ingestion Patterns
+## 4. Core File-Based Ingestion Patterns
 
 ### 4.1 Pattern 1: Continuous File Loading (Primary Pattern)
-The backbone of our ingestion strategy is **Snowpipe with Auto-Ingest**. This is used for all systems that can export data files (CSV, JSON, Parquet) to our cloud storage.
-
-*   **How it Works:** 
-    1. A source system writes a new file to an External Stage (e.g., an S3 bucket).
-    2. The cloud provider generates an event notification (e.g., SQS queue message).
-    3. Snowflake reads the event queue continuously. When a new message arrives, Snowpipe automatically provisions serverless compute and executes a pre-defined `COPY INTO` statement to load the file into a "Raw" staging table.
-*   **Operational Benefits:** No cron jobs to maintain, no virtual warehouses to size or schedule. Snowflake manages the compute layer entirely, billing only for the per-second compute used to load the files.
-*   **File Sizing Best Practices:** To optimize Snowpipe costs and performance, upstream systems should batch data into files sized between **100 MB and 250 MB (uncompressed)**, which typically equates to 10–100 MB after compression depending on format. Streaming thousands of very small files incurs unnecessary per-file overhead charges.
-*   **Deduplication:** Snowpipe automatically tracks file metadata for 14 days, preventing the same file from being ingested twice if an event is re-sent.
+The backbone of our batch/micro-batch ingestion strategy is **Snowpipe with Auto-Ingest**. This is used for all systems that can export data files to cloud storage.
+*   **How it Works:** The cloud provider generates an event notification (e.g., SQS) when a file is dropped in S3. Snowflake reads the queue and executes a serverless `COPY INTO` command automatically.
+*   **Operational Benefits:** No cron jobs to maintain, no virtual warehouses to size.
+*   **File Sizing Best Practices:** 100 MB to 250 MB (uncompressed).
 
 ### 4.2 Pattern 2: Bulk Batch Loading
-For massive historical migrations or specific end-of-month financial dumps where event-driven loading isn't feasible, we utilize the standard `COPY INTO` command.
-*   **How it Works:** Files are placed in cloud storage. A Snowflake Task (or an engineer, manually) provisions a large, dedicated Virtual Warehouse and executes `COPY INTO <table> FROM @<stage>`.
-*   **Operational Benefits:** Allows for precise control over compute resources (e.g., spinning up an X-Large warehouse for 10 minutes to process terabytes of data quickly).
-*   **Critical Parameters:**
-    *   `ON_ERROR = SKIP_FILE`: Explicitly set error behavior. The default differs from Snowpipe; `SKIP_FILE` is recommended to prevent a single bad file from halting the entire load.
-    *   `PURGE = TRUE`: Automatically removes successfully loaded files from the stage after loading, preventing stage storage accumulation and associated charges.
-    *   `MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE`: Maps source file columns to target table columns by name, making the load resilient to column reordering in source files.
+For massive historical migrations where event-driven loading isn't feasible, we utilize the standard `COPY INTO` command using a dedicated Virtual Warehouse.
 
-### 4.3 Pattern 3: Snowpipe Streaming (Ultra-Low Latency)
-For specific data sources that require sub-second latency (e.g., critical application logs or IoT telemetry), file-based Snowpipe is bypassed.
-*   **How it Works:** Using the Snowpipe Streaming API via the **Snowflake Kafka Connector** (recommended) or a client SDK (available in **Python, Java, and Go**), rows are written directly into Snowflake tables over the network, entirely bypassing cloud storage files.
-*   **Operational Benefits:** Delivers lower latency and lower cost than continuous file loading for high-velocity, real-time streams.
-
-### 4.4 Preferred File Format Guidelines
-The choice of file format significantly impacts Snowpipe performance and cost. The following guidelines apply to Patterns 1 & 2:
-
+### 4.3 Preferred File Format Guidelines
 | Format | Recommendation | Notes |
 |---|---|---|
-| **Parquet** | ✅ Preferred | Columnar, compressed, native type preservation. Fastest load speed into Snowflake. |
-| **JSON / NDJSON** | ✅ Acceptable | Ideal for nested data loaded into `VARIANT` columns. Use NDJSON for Snowpipe. |
-| **CSV** | ⚠️ Fallback Only | No type info; requires careful delimiter config. Acceptable for legacy systems only. |
-| **Avro / ORC** | ✅ Supported | Good for Kafka-sourced data via Snowpipe Streaming. |
-
-### 4.5 Schema Evolution Strategy
-Source systems change over time. The ingestion layer handles this gracefully:
-*   **`VARIANT` Columns for JSON:** Raw JSON is ingested into a single `VARIANT` column. Schema changes at the source do not break the ingestion pipeline. Downstream Dynamic Tables extract fields using dot-notation (`payload:field_name::type`).
-*   **`INFER_SCHEMA`:** For file-based sources (Parquet/CSV), `INFER_SCHEMA` auto-detects the column structure from staged files, used to validate or evolve the target table definition before a bulk load.
+| **Parquet** | ✅ Preferred | Columnar, compressed, native type preservation. Best for schema evolution. |
+| **JSON / NDJSON** | ✅ Acceptable | Ideal for nested data loaded into `VARIANT` columns. |
+| **CSV** | ⚠️ Fallback Only | No type info; brittle schema mapping. Avoid if possible. |
 
 ---
 
-## 5. Deep Dive: Snowpipe Reliability & State Management
+## 5. Handling Schema Discrepancy & Format Evolution
 
-While Snowpipe abstracts away compute management, understanding how it manages state is critical for long-term operations and disaster recovery.
+Upstream systems frequently change—columns are added, data types drift (e.g., from `INT` to `STRING`), or malformed records are accidentally produced. **A file ingestion pipeline must never break when these discrepancies occur.** We employ three core strategies to handle evolution gracefully.
 
-### 5.1 State Management & Idempotency
-Snowpipe is designed to be intrinsically idempotent. It automatically maintains internal state by tracking the metadata (file name, path, and ETag) of every file it loads. 
-*   **14-Day Memory:** Snowpipe retains this load history metadata for 14 days.
-*   **Automatic Deduplication:** If an external system accidentally re-sends an event notification for a file that was already processed within the 14-day window, Snowpipe will recognize the file and ignore it. This prevents duplicate records from being loaded into the Raw tables without requiring complex deduplication logic in the ETL pipeline.
+### 5.1 Native Table Schema Evolution (The "Happy Path")
+For robust, strongly-typed file formats (**Parquet, Avro, ORC**), Snowflake provides native automated schema evolution. When an upstream system adds a new column to a Parquet file, Snowflake can automatically alter the target table to include the new column without human intervention.
 
-### 5.2 Replay & Recovery Operations
-In scenarios where data needs to be re-ingested (e.g., a bug was found in downstream logic, or a file was initially loaded with an incorrect schema), the default 14-day idempotency prevents simple re-triggering.
-*   **Manual Replay:** To force Snowpipe to replay files, engineers use the `ALTER PIPE ... REFRESH` command. By utilizing the `MODIFIED_AFTER` parameter, engineers can specify a precise timeframe to rescan the cloud storage stage and ingest files that were previously missed or need re-processing.
-*   **Targeted Reloads:** For single files or specific batches, engineers can temporarily bypass Snowpipe and execute a manual `COPY INTO <table> FROM @<stage>/<path> FORCE = TRUE` to explicitly override the idempotency checks.
+*   **Implementation Configuration:**
+    1.  The target Bronze table must have `ENABLE_SCHEMA_EVOLUTION = TRUE` set.
+    2.  The `COPY INTO` statement or Snowpipe definition must use `MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE`.
 
-### 5.3 Long-Term Operations & Stale Pipes
-Because Snowpipe is fully managed, there are no virtual warehouses to patch or upgrade. However, operational teams must be aware of pipe states:
-*   **Paused Pipes:** If a pipe is manually paused (`ALTER PIPE ... SET PIPE_EXECUTION_PAUSED = true`), event notifications will queue up. Once resumed, the pipe will process the backlog automatically.
-*   **Stale Pipes:** If a pipe remains paused for longer than 14 days, its internal metadata expires, and it is marked as "stale." When resuming a stale pipe, it will not automatically process the 14+ day backlog. Engineers must manually trigger an `ALTER PIPE ... REFRESH` to safely catch up the state before standard event-driven ingestion can resume.
+```sql
+-- Enable automated evolution on the base table
+ALTER TABLE bronze.sales_transactions SET ENABLE_SCHEMA_EVOLUTION = TRUE;
+```
+
+### 5.2 Semi-Structured Schema-on-Read (The "Flexible Path")
+When dealing with highly erratic upstream sources (like third-party JSON APIs), strict relational mapping is impossible. We utilize the **Schema-on-Read Pattern**.
+
+*   **Implementation:** The entire raw JSON payload is ingested into a single Snowflake `VARIANT` column.
+*   **Evolution Handling:** Because `VARIANT` does not enforce strict schemas on write, the pipeline *cannot* break due to upstream column additions or type changes. Downstream Dynamic Tables parse the `VARIANT` field safely using dot-notation.
+
+### 5.3 Dead Letter Queue (DLQ) Quarantine (The "Failure Path")
+When data format discrepancies cause hard type-casting failures (e.g., passing `"Unknown"` into an `INT` column), we isolate the bad data without stopping the pipeline for the good data.
+
+We implement a **DLQ Quarantine Pattern** utilizing Snowflake's `ON_ERROR = CONTINUE` property alongside `VALIDATION_MODE`.
+
+#### The DLQ Architecture Diagram
+
+```mermaid
+flowchart TD
+    Source["Upstream Source <br>&#40;CSV / Parquet&#41;"]
+    Stage["External Stage <br>&#40;@s3_landing_zone&#41;"]
+    
+    subgraph Snowflake Ingestion Layer
+        Pipe["Snowpipe <br>&#40;ON_ERROR = CONTINUE&#41;"]
+        GoodTable[("BRONZE.SALES_CORE <br>&#40;Clean Rows&#41;")]
+        
+        Task["Quarantine Task <br>&#40;Runs every hour&#41;"]
+        DLQ[("BRONZE.SALES_QUARANTINE <br>&#40;Bad Rows + Error Details&#41;")]
+    end
+    
+    Alert["Slack / PagerDuty Alert <br>&#40;Data Engineering Team&#41;"]
+
+    %% Flow
+    Source --> Stage
+    Stage --> Pipe
+    
+    Pipe -->|Successfully Cast Rows| GoodTable
+    Pipe -.- |Rejected Rows| Stage
+    
+    %% The Quarantine Collection
+    Task -->|COPY INTO ... VALIDATION_MODE = RETURN_ERRORS| DLQ
+    DLQ -->|Error Count > 0| Alert
+
+    %% Styling
+    classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
+    classDef bad fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
+    classDef process fill:#dae8fc,stroke:#6c8ebf,stroke-width:1px,color:#000;
+    
+    class Source,Stage storage;
+    class GoodTable storage;
+    class DLQ bad;
+    class Pipe,Task process;
+```
+
+#### DLQ Implementation Strategy
+1.  **Ingest with Resilience:** The Snowpipe is configured with `ON_ERROR = CONTINUE`. Snowflake loads all successful rows and rejects malformed rows, but *does not fail the file*.
+2.  **Quarantine Sweep:** A scheduled Serverless Task runs periodically, utilizing `VALIDATION_MODE = RETURN_ERRORS`. This extracts the exact error metadata from the `COPY_HISTORY`.
+3.  **Isolation & Alerting:** The rejected metadata is inserted into a dedicated `_QUARANTINE` table and alerts the engineering team.
 
 ---
 
-## 6. Data Transformation & Orchestration (Native)
+## 6. Deep Dive: Snowpipe Reliability & State Management
 
-To maintain simplicity, we do not use external orchestrators immediately after ingestion. Once data lands in the Raw (Bronze) tables via Snowpipe, we use native features to process it. Two approaches are supported, ordered by preference:
+### 6.1 State Management & Idempotency
+Snowpipe automatically maintains internal state by tracking the metadata of every file it loads for 14 days, preventing duplicate ingestions intrinsically.
 
-### 6.1 Primary: Dynamic Tables (Preferred)
-**Dynamic Tables** are the recommended approach for transforming Bronze data into cleansed Silver data. They are fully declarative — you define the target state as a SQL `SELECT` statement, and Snowflake automatically manages incremental refresh, scheduling, and state tracking.
-*   **Target Lag:** Configure `TARGET_LAG = '5 MINUTES'` to ensure Silver data is kept fresh relative to Bronze.
-*   **Lineage & Monitoring:** Dynamic Table pipelines are visualized natively in Snowsight (Graph tab), showing the full Bronze → Silver dependency graph and current refresh lag against the target.
-
-### 6.2 Fallback: Streams + Serverless Tasks
-For complex, procedural transformations that cannot be expressed as a single declarative SQL query:
-1.  **Append-Only Streams:** An `APPEND_ONLY = TRUE` Stream on the Bronze table tracks new rows with minimal overhead.
-2.  **Serverless Tasks:** A Task triggered by `WHEN SYSTEM$STREAM_HAS_DATA` executes a `MERGE` statement to apply deduplication and type casting into Silver tables.
-
-### 6.3 Task Failure Handling
-A failure strategy must be defined regardless of the approach used:
-*   **Failure Notifications:** Configure `ERROR_INTEGRATION` on Tasks to push failure alerts to a Snowflake Notification Integration (e.g., SNS topic → Slack/PagerDuty).
-*   **History Auditing:** Use `INFORMATION_SCHEMA.TASK_HISTORY` to audit every run, its status, and error messages.
-*   **Dead-Letter Pattern:** Rows that consistently fail transformation are routed to a dedicated `_quarantine` table for investigation, preventing pipeline blocking.
+### 6.2 Replay & Recovery Operations
+*   **Manual Replay:** To force Snowpipe to replay files, engineers use `ALTER PIPE ... REFRESH` with the `MODIFIED_AFTER` parameter.
+*   **Stale Pipes:** If a pipe remains paused for longer than 14 days, it is marked as "stale." Engineers must manually trigger a refresh to safely catch up the state.
 
 ---
 
-## 7. Operational Excellence & Monitoring
+## 7. Data Transformation & Orchestration (Native)
 
-Operating Snowpipe is fundamentally different from operating a traditional ETL tool. Monitoring focuses on file validation and platform health.
+Once data lands securely in the Bronze tables, we use native features to process it.
 
-*   **Error Handling (Validation Mode):** Snowpipe is configured with `ON_ERROR = CONTINUE`. If a malformed row exists in a file, Snowpipe loads the good data and skips the bad.
-*   **Error Notifications:** We utilize Snowflake's native **Error Notifications**. If a file fails to load entirely, Snowflake pushes an alert to an external notification integration (e.g., SNS topic -> Slack/Email alert).
-*   **Monitoring Views:** Engineers use the `INFORMATION_SCHEMA.PIPE_USAGE_HISTORY` to track the serverless credit consumption of ingestion, and the `COPY_HISTORY` view to audit exactly which files were loaded, when, and if any row-level errors occurred.
+### 7.1 Primary: Dynamic Tables (Preferred)
+**Dynamic Tables** are the recommended approach for transforming Bronze data into cleansed Silver data. They are fully declarative.
+*   **Target Lag:** Configure `TARGET_LAG = '5 MINUTES'` to ensure Silver data is kept fresh.
+
+### 7.2 Fallback: Streams + Serverless Tasks
+For procedural transformations that cannot be expressed declaratively, use `APPEND_ONLY` streams driving serverless tasks.
 
 ---
 
-## 8. Security & Governance
+## 8. Data Quality & Data Contracts
 
-*   **No Long-Term Credentials:** Snowflake never uses hardcoded AWS/Azure/GCP access keys. We strictly use **Storage Integrations** based on IAM Roles (AWS IAM, Azure AD Managed Identity). This delegates trust securely without passing secrets.
-*   **Network Isolation:** If required, ingestion happens over private cloud networks (e.g., AWS PrivateLink) ensuring data never traverses the public internet between the cloud storage bucket and the Snowflake tenant.
-*   **RBAC:** Strict Role-Based Access Control is enforced. A dedicated `INGESTION_ROLE` owns the Pipes and Stages, and has purely `INSERT` privileges on the Raw tables. Analysts and BI tools are strictly denied access to the raw ingestion layer.
-*   **PII & Data Classification:** Raw ingested data (Bronze layer) may contain PII. We apply **Snowflake Data Classification** tags (`PRIVACY_CATEGORY`, `SEMANTIC_CATEGORY`) to sensitive columns at the point of ingestion. These tags allow downstream Dynamic Data Masking policies in the Silver and Gold layers to automatically inherit and enforce PII controls without manual re-tagging at each layer.
-*   **Network Policies:** Snowflake **Network Policies** restrict which IP ranges or VPC endpoints are permitted to interact with the ingestion pipeline, providing an additional layer of defense against unauthorized pipe operations.
+Loading data successfully is only half the battle; the data must be accurate. To ensure integration correctness, we implement a robust Data Quality framework.
+
+### 8.1 Shift-Left Data Contracts
+Data quality should be enforced as close to the source as possible. We establish **Data Contracts** with upstream application teams. 
+*   If a source system breaks a contract (e.g., sending `NULL` for a required `user_id`), it is caught by the ingestion layer's DLQ (Section 5.3) rather than silently corrupting the warehouse.
+
+### 8.2 Snowflake Data Metric Functions (DMFs)
+Once data lands in the Bronze and Silver layers, we utilize Snowflake's native Data Metric Functions (or dbt tests) to continuously monitor quality without extracting data.
+*   **Freshness:** Ensure event data is arriving on time.
+*   **Uniqueness:** Ensure primary keys (`transaction_id`) are never duplicated.
+*   **Referential Integrity:** Ensure every `order_id` in the order items table exists in the main orders table.
+*   **Action:** If a DMF fails, an alert is sent to Data Engineering, and downstream Dynamic Tables can be suspended to prevent bad data from reaching executive dashboards.
+
+---
+
+## 9. Operational Excellence & Monitoring
+
+Monitoring focuses on file validation and platform health.
+*   **Monitoring Views:** Engineers use `INFORMATION_SCHEMA.PIPE_USAGE_HISTORY` and `COPY_HISTORY` to track consumption and errors.
+*   **Task Failure Handling:** Configure `ERROR_INTEGRATION` on Serverless Tasks to push failure alerts to an SNS topic.
+
+---
+
+## 10. Security & Governance
+
+*   **No Long-Term Credentials:** We strictly use **Storage Integrations** based on IAM Roles to securely delegate cloud storage trust.
+*   **RBAC:** A dedicated `INGESTION_ROLE` owns the Pipes and Stages, and has purely `INSERT` privileges on the Raw tables. Analysts are strictly denied access to the raw ingestion layer.

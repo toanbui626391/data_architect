@@ -140,3 +140,40 @@ Instead of simply dropping bad records, enterprise architectures demand a Dead L
 The DLT Event Log captures all pipeline metrics. We configure Databricks SQL Alerts on the `event_log` table to trigger Webhook notifications to Slack/PagerDuty whenever:
 *   A pipeline fails.
 *   The rate of data dropped by `@expect_or_drop` exceeds a specified threshold (e.g., > 5% of the stream is malformed).
+
+### 6.4 Data Quality Requirements per Medallion Layer
+To maintain trust without creating brittle pipelines, data quality rules must be applied progressively across the layers:
+
+1.  **Bronze Layer (Capture Everything):**
+    *   **Requirement:** *Zero data loss.* Do not filter out bad business data here. 
+    *   **Rules:** Enforce only structural integrity. Use schema evolution and `_rescued_data` to ensure unexpected columns or data type mismatches do not crash the pipeline. All raw events must be captured for auditability and replayability.
+2.  **Silver Layer (Strict Conformance):**
+    *   **Requirement:** *Syntactic correctness and deduplication.*
+    *   **Rules:** Apply strict `@expect_or_drop` rules for Primary Keys (`id IS NOT NULL`) and deduplicate streams using `APPLY CHANGES INTO`. Filter out corrupted records into the DLQ (Quarantine). Data landing in Silver must be clean enough for Data Scientists to trust.
+3.  **Gold Layer (Business Logic):**
+    *   **Requirement:** *Semantic and business correctness.*
+    *   **Rules:** Apply `@expect` rules to validate business constraints (e.g., `order_total > 0`, `status IN ('Pending', 'Shipped')`). Ensure foreign keys joining to dimension tables are valid. Failures here often indicate logic bugs rather than ingestion errors.
+
+---
+
+## 7. Operational Best Practices
+
+To ensure the Real-Time Ingestion Architecture runs efficiently, securely, and cost-effectively in production, adhere to the following best practices:
+
+### 7.1 Compute & Cost Optimization
+*   **Default to Serverless DLT:** Use Serverless DLT for automatic compute management and rapid scaling. If using Classic DLT, always enable **Enhanced Autoscaling** to handle sudden data spikes without over-provisioning.
+*   **Strategic Execution Modes:** Do not run clusters continuously 24/7 unless sub-minute latency is a strict business requirement. Use `Trigger.AvailableNow` (Scheduled Micro-Batch) for hourly or daily ingestion to significantly reduce costs.
+*   **Cluster Sizing (Classic DLT):** For streaming workloads, favor compute-optimized instances (e.g., AWS `c5` or Azure `Fsv2` series) over memory-optimized instances, as streaming is typically CPU-bound.
+
+### 7.2 Storage & State Management
+*   **Let DLT Manage Maintenance:** DLT automatically handles `OPTIMIZE` (file compaction) and `VACUUM` (stale file removal) for your Delta tables. Do not run these commands manually on DLT-managed tables.
+*   **Checkpoint Locations:** Store stream checkpoints in robust cloud storage (S3/ADLS/GCS) rather than root DBFS to ensure state durability and avoid corruption during cluster restarts.
+*   **Change Data Feed (CDF) Prudence:** Only enable CDF on source tables if downstream pipelines actually require incremental upserts (`APPLY CHANGES INTO`). Leaving it on unnecessarily consumes excess storage.
+
+### 7.3 Data Quality & Schema Operations
+*   **Monitor Rescued Data:** Regularly query the `_rescued_data` column in the Bronze layer. A sudden spike indicates an upstream application has silently changed its schema or data types, requiring engineering intervention.
+*   **Quarantine (DLQ) Remediation:** Set up an operational workflow to review the Quarantine (Dead Letter Queue) tables weekly. Fix data anomalies at the source application whenever possible, rather than endlessly patching the ingestion pipeline.
+
+### 7.4 CI/CD and Deployment
+*   **Infrastructure as Code:** Deploy DLT pipelines exclusively using **Databricks Asset Bundles (DABs)** or Terraform. Never deploy or modify production pipelines manually via the UI.
+*   **Environment Isolation:** Strictly separate Development, Staging, and Production workspaces. Use the `PREVIEW` DLT channel in Staging to catch runtime bugs before Databricks rolls out updates to your `CURRENT` Production channel.

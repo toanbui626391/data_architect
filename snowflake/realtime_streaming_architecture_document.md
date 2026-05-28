@@ -28,39 +28,52 @@ flowchart LR
         Microservices["Backend Microservices"]
     end
 
-    subgraph MessageBus [Streaming Platform]
+    subgraph MessageBus [Kafka Platform: Streaming & Native DQ]
         direction TB
+        Registry["Schema Registry <br>&#40;Strict Validation&#41;"]
         Kafka["Apache Kafka / MSK"]
-        DLT[("Dead Letter Topic <br>&#40;DLT&#41;")]
+        DLT[("Dead Letter Topic <br>&#40;DLQ Auditing&#41;")]
+        C3["Confluent Control Center <br>&#40;Native Monitoring&#41;"]
     end
 
-    subgraph Snowflake [Snowflake Data Cloud]
+    subgraph Snowflake [Snowflake Data Cloud: Native Ops]
         direction TB
         Connector["Snowflake Kafka Connector <br>&#40;Streaming API&#41;"]
         Table[("Raw Bronze Table")]
         DT["Dynamic Table <br>&#40;Lag = 1 MINUTE&#41;"]
         Silver[("Clean Silver Table")]
+        Snowsight["Snowsight Dashboards & Alerts <br>&#40;Native Monitoring&#41;"]
     end
 
-    App -->|JSON Events| Kafka
-    Microservices -->|JSON Events| Kafka
+    App -->|JSON Events| Registry
+    Microservices -->|JSON Events| Registry
+    Registry -->|Validated Payload| Kafka
+    
     Kafka -->|Sub-second write| Connector
     
     %% Handling Discrepancies at the Connector
     Connector -->|Malformed Record| DLT
     Connector -->|Valid Record Insert| Table
+    Connector -.->|Tombstone / Deletes| Table
     
     Table -.->|Continuous Refresh| DT
     DT --> Silver
+    
+    %% Native Observability Links
+    Connector -.->|Offset Lag| C3
+    DLT -.->|Alerting| C3
+    Table -.->|Ingestion Metrics| Snowsight
 
     %% Styling
     classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
     classDef bad fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     classDef process fill:#dae8fc,stroke:#6c8ebf,stroke-width:1px,color:#000;
+    classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
     
     class Table,Silver storage;
     class DLT bad;
-    class Connector,DT process;
+    class Connector,DT,Registry process;
+    class C3,Snowsight monitor;
 ```
 
 ---
@@ -116,7 +129,7 @@ Unlike batch file ingestion where Snowflake handles the Dead Letter Queue, in a 
     errors.deadletterqueue.context.headers.enable = true
     ```
 *   **Behavior:** When the connector attempts to cast a malformed JSON payload and fails, it does not crash. It skips the message, writes the raw malformed payload and the error reason to the `snowflake_ingest_dlq` topic, and continues streaming the healthy records into Snowflake.
-*   **Alerting:** The Data Engineering team monitors the DLT topic to investigate application drift.
+*   **Alerting:** The Data Engineering team natively monitors the DLT topic via the Kafka UI to investigate application drift.
 
 ### 6.2 Top Causes of Bad Records & Remediation Strategy
 
@@ -147,3 +160,67 @@ Writing data in milliseconds is useless if transformations take hours. To mainta
 *   **Dynamic Tables:** All data from the streaming Bronze table is transformed using Snowflake Dynamic Tables.
 *   **Configuration:** We set the `TARGET_LAG = '1 MINUTE'` (or 'DOWNSTREAM') on the Dynamic Table. 
 *   **Behavior:** Snowflake continuously reads the streaming raw table using invisible streams, executing incremental refreshes to populate the modeled Silver table. This provides analysts with near real-time dashboards automatically.
+
+---
+
+## 8. Cost Optimization & Latency Tuning
+
+A common architectural question is whether streaming is prohibitively expensive compared to batching. Because Snowpipe Streaming bypasses cloud storage (S3/GCS) completely and writes directly to Snowflake micro-partitions, it is highly cost-efficient out of the box. 
+
+However, you can explicitly tune the architecture based on your SLA (Service Level Agreement) to balance latency and cost.
+
+### 8.1 Buffer Tuning (Connector Configuration)
+The Snowflake Kafka Connector does not require an active Snowflake Virtual Warehouse (it uses serverless compute). Costs are primarily driven by the frequency of flushes (API calls) to Snowflake.
+
+You control the frequency of these flushes via the connector configuration:
+
+*   **Real-Time Configuration (Higher Cost):** If the business requires sub-second latency, configure the connector to flush rapidly.
+    *   `buffer.flush.time = 1` (Flush every second)
+*   **Cost-Optimized Configuration (Lower Cost):** If a slight delay is acceptable, increase the buffer time. This batches more records into a single API call and produces larger, more optimized micro-partitions in Snowflake, reducing serverless compute costs.
+    *   `buffer.flush.time = 60` (Flush every 60 seconds)
+    *   `buffer.count.records = 100000` (Flush when 100k records accumulate)
+
+### 8.2 True Daily Batch vs. Streaming
+The Snowflake Kafka Connector is explicitly designed for continuous, always-on streaming. 
+
+If the business requirement specifically asks for a **Daily Batch** load (i.e., latency is not a concern at all and maximum cost savings are required), the Kafka Connector is the wrong architectural pattern. 
+
+**For a True Daily Batch:**
+1.  Replace the Snowflake Kafka Connector with a standard **Cloud Storage Sink Connector** (e.g., Kafka to S3).
+2.  Let Kafka dump raw JSON files into S3 continuously.
+3.  Schedule a Snowflake Task to spin up a Virtual Warehouse once a day to run a bulk `COPY INTO` command. This utilizes bulk compute pricing rather than continuous streaming pricing.
+
+---
+
+## 9. Observability & Data Quality (Kafka to Bronze)
+
+To keep the architecture simple, easy to maintain, and free of third-party dependencies, we rely exclusively on the **Native Observability** tools provided by the respective platforms.
+
+### 9.1 Native Observability: Monitoring Stream Health
+You monitor metrics directly within the platforms where the compute is happening:
+
+*   **Kafka Side (Confluent Control Center):** We utilize Confluent Control Center (or your native Kafka UI) to monitor the Snowflake Kafka Connector. You must configure alerts for the following critical metrics:
+    *   **Consumer Lag (`records-lag-max`):** Alert if lag continuously grows over a 5-minute window, indicating the connector cannot keep up with event volume (requires scaling `tasks.max` or tuning buffers).
+    *   **Connector State (`connector-state`):** Alert immediately if the status changes to `FAILED` (usually indicates authentication failure or severe misconfiguration).
+    *   **Throughput (`records-consumed-rate`):** Alert if throughput unexpectedly drops to `0` during business hours (indicates a silent upstream producer failure).
+*   **Snowflake Side (Snowsight Dashboards):** We build operational dashboards directly inside Snowflake using **Snowsight**. You must configure alerts for the following critical metrics:
+    *   **Streaming Client Health:** Query `SNOWPIPE_STREAMING_CLIENT_HISTORY`. Alert if active clients suddenly drop to `0` (indicates the Kafka Connector was shut down or lost network access to Snowflake).
+    *   **Ingestion Latency & Throughput:** Query `SNOWPIPE_STREAMING_FILE_MIGRATION_HISTORY`. Track `RECORD_COUNT` and alert if the average ingestion latency spikes, which indicates Snowflake is struggling to flush buffers to micro-partitions.
+    *   **Dynamic Table Lag:** Query `DYNAMIC_TABLE_REFRESH_HISTORY`. Streaming fast into Bronze is useless if transformations are slow. Alert if the `ACTUAL_LAG` exceeds your defined `TARGET_LAG` (e.g., > 1 minute), which indicates your Virtual Warehouse is undersized.
+
+### 9.2 Data Quality: Pre-Bronze Validation (Kafka)
+Because the data is flowing directly from the message bus into Snowflake via an API, you cannot execute complex SQL transformations *before* it lands in Bronze. Data Quality in this specific leg relies on strict upstream enforcement.
+
+1.  **Strict Schema Enforcement (Shift-Left):** Do not rely on Snowflake to catch every malformed JSON payload. Implement a **Confluent Schema Registry** on the topic itself. The Kafka brokers will reject bad data from producers before it even reaches the Snowflake Connector.
+    *   **Alert to Configure:** Monitor **Schema Registry Compatibility Rejections**. A spike indicates an upstream engineering team deployed a code change that broke the agreed-upon data contract.
+2.  **Tombstone Record Handling:** In Kafka, a `NULL` payload often represents a "delete" event (a tombstone). You must explicitly configure how the connector handles these:
+    *   `behavior.on.null.values = IGNORE` (Drops the record completely).
+    *   `behavior.on.null.values = DEFAULT` (Passes the NULL into the Snowflake Bronze table, allowing downstream Dynamic Tables to process the delete operation).
+    *   **Alert to Configure:** Monitor for **Tombstone/Null Payload Spikes**. A sudden, massive spike (e.g., 500% above baseline) usually indicates an upstream application bug accidentally deleting records en masse.
+3.  **Dead Letter Queue (DLQ) Auditing:** As outlined in Section 6.1, any record that cannot be parsed or cast into the Bronze table is diverted to a Kafka DLQ topic.
+    *   **Alert to Configure:** Alert immediately if **DLQ Message Count > 0** over a 5-minute window. Data Quality is only maintained if this topic is actively monitored via Confluent Control Center, allowing engineers to triage casting errors natively.
+
+### 9.3 Data Quality: Post-Landing Alerts (Snowsight)
+Once the data successfully lands in the Bronze table, Data Quality monitoring shifts entirely to Snowflake Snowsight.
+*   **Schema Evolution Alerts:** If `ENABLE_SCHEMA_EVOLUTION = TRUE`, configure a Snowflake Alert to trigger whenever a new column appears in the Bronze table. This notifies analysts that new fields are available for downstream modeling.
+*   **Variant Parsing Failures:** If you are using the `VARIANT` fallback approach (schemaless JSON), write a scheduled alert to count rows where `TRY_CAST(record_content:critical_id AS INT) IS NULL`. This flags records that landed successfully but are structurally broken for business use.

@@ -65,3 +65,10 @@ If the upstream source sends duplicate records at the exact same time, or if an 
 Notice that the process is split into two steps:
 1.  **`CREATE STREAMING TABLE`**: Declares the existence of the table and attaches constraints (Data Quality Expectations).
 2.  **`APPLY CHANGES INTO`**: Defines the transformation logic and feeds the table. You cannot combine these into a single `CREATE TABLE AS SELECT` when doing incremental upserts.
+
+### 2.5 Batch vs. Streaming Configuration
+A major architectural advantage of DLT is that **you do not change the SQL code** to switch between batch and streaming execution. The SQL remains exactly as written above (`STREAM(...)`).
+
+Instead, execution mode is controlled entirely via the **DLT Pipeline Settings** (in the Databricks UI or JSON config):
+*   **Stream Mode (Real-Time):** Set the pipeline mode to **Continuous**. Databricks spins up an always-on cluster. As soon as a row hits Bronze, it flows immediately into Silver. 
+*   **Batch Mode (Triggered Micro-Batch):** Set the pipeline mode to **Triggered** (and schedule it via a Databricks Job, e.g., hourly). Databricks spins up a cluster, processes all new Bronze records incrementally into Silver, and immediately shuts down the cluster to optimize costs.

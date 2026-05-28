@@ -24,20 +24,30 @@ The following diagram illustrates the flow of data from live applications throug
 ```mermaid
 flowchart LR
     subgraph PublicInternet [Public Internet]
-        App["Mobile / Web Apps"]
+        SaaS["External SaaS APIs <br>&#40;Salesforce, Stripe&#41;"]
+    end
+    
+    subgraph PartnerVPC [Partner / External VPC]
+        PartnerDB[("Partner Database")]
     end
 
     subgraph CustomerVPC [Customer AWS VPC]
         direction TB
         
-        subgraph AppTier [Application Tier]
-            direction TB
-            Microservices["Backend Microservices <br>&#40;Standard REST APIs&#41;"]
-            SourceDB[("Operational Database <br>&#40;PostgreSQL / MySQL&#41;")]
+        subgraph AppTier [Internal App Tier]
+            InternalDB[("Internal Database")]
+        end
+        
+        subgraph NetworkEgress [Egress & Peering]
+            NATGW["NAT Gateway <br>&#40;Outbound Internet&#41;"]
+            TG["VPC Peering / <br>Transit Gateway"]
         end
         
         subgraph MessageBus [Kafka Platform: Streaming & Native DQ]
-            SourceConn["Kafka Source Connector <br>&#40;CDC / Debezium&#41;"]
+            SaaSConn["SaaS Source Connector"]
+            PartnerConn["JDBC Source Connector"]
+            CDCConn["Debezium CDC Connector"]
+            
             Registry["Schema Registry <br>&#40;Strict Validation&#41;"]
             Kafka["Apache Kafka / MSK"]
             DLT[("Dead Letter Topic <br>&#40;DLQ Auditing&#41;")]
@@ -55,11 +65,20 @@ flowchart LR
         Snowsight["Snowsight Dashboards & Alerts <br>&#40;Native Monitoring&#41;"]
     end
 
-    App -->|Standard HTTPS| Microservices
-    Microservices -->|SQL Inserts/Updates| SourceDB
-    SourceDB -.->|Reads Transaction Log| SourceConn
+    %% Network Routes to Kafka Connect
+    SaaSConn -.->|HTTPS Pull via NAT| NATGW
+    NATGW -.-> SaaS
     
-    SourceConn -->|JSON Events| Registry
+    PartnerConn -.->|TCP via Peering| TG
+    TG -.-> PartnerDB
+    
+    CDCConn -.->|Reads Transaction Log| InternalDB
+    
+    %% Kafka Internal Flow
+    SaaSConn -->|JSON Events| Registry
+    PartnerConn -->|JSON Events| Registry
+    CDCConn -->|JSON Events| Registry
+    
     Registry -->|Validated Payload| Kafka
     
     Kafka -->|Sub-second write| Connector
@@ -85,11 +104,11 @@ flowchart LR
     classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
     classDef network fill:#f9f9f9,stroke:#666,stroke-width:2px,color:#000,stroke-dasharray: 5 5;
     
-    class Table,Silver,SourceDB storage;
+    class Table,Silver,InternalDB,PartnerDB storage;
     class DLT bad;
-    class Connector,DT,Registry,Kafka,VPCE,SourceConn process;
+    class Connector,DT,Registry,Kafka,VPCE,SaaSConn,PartnerConn,CDCConn process;
     class C3,Snowsight monitor;
-    class CustomerVPC,Snowflake network;
+    class CustomerVPC,Snowflake,NetworkEgress network;
 ```
 
 ---
@@ -260,10 +279,9 @@ Because Snowpipe Streaming moves data continuously from your AWS network (where 
     *   The private key is securely stored in AWS Secrets Manager (or HashiCorp Vault) and passed to the connector at runtime.
 *   **Least Privilege (RBAC):** The `KAFKA_STREAMING_USER` is assigned a dedicated role that only has `INSERT` privileges on the target Bronze tables. It cannot run `SELECT` statements or access downstream Silver/Gold data.
 
-### 10.3 Inbound Networking (The CDC Source Connector Pattern)
-To keep the architecture as simple and maintainable as possible, we **do not** write custom Kafka Producer code in our microservices or deploy custom REST Proxies. Instead, we rely entirely on the Kafka Connect ecosystem.
+### 10.3 Inbound Networking (Hybrid Multi-Source Connector Pattern)
+To keep the architecture simple and easy to maintain, we **do not** write custom Kafka Producer code or deploy custom REST Proxies. Instead, we rely entirely on a centralized **Kafka Connect** cluster to pull data from all internal and external sources.
 
-1.  **The Application Tier:** Mobile apps and web browsers communicate with standard Backend Microservices via normal HTTPS REST APIs. These microservices perform standard CRUD operations against a secure operational database (e.g., PostgreSQL, MySQL) living inside the Customer VPC.
-2.  **The Kafka Source Connector (CDC):** We deploy a **Kafka Source Connector** (such as Debezium for Change Data Capture or a standard JDBC Source Connector). 
-    *   **Network Flow:** The Source Connector lives inside the private Customer VPC. It securely connects to the operational database, reads the transaction logs, and automatically streams every `INSERT`, `UPDATE`, and `DELETE` event directly into the Kafka brokers.
-    *   **Benefits:** This completely shields the Kafka brokers from the public internet. No custom streaming code needs to be maintained by software engineering teams; the data pipeline is managed entirely through declarative Kafka Connect configurations.
+1.  **Internal VPC Applications (CDC):** Internal mobile apps and web browsers communicate with backend microservices via standard HTTPS. These microservices write to an internal operational database. A **Debezium CDC Source Connector** reads the database transaction logs and streams changes into Kafka over the private AWS backbone.
+2.  **External Peered VPC Applications:** For databases or applications hosted in a partner's VPC (or a different cloud provider), we establish a **VPC Peering Connection** (or AWS Transit Gateway). A **JDBC Source Connector** securely pulls data across the peering connection without traversing the public internet.
+3.  **Public Internet / SaaS Applications:** To ingest data from external SaaS providers (e.g., Salesforce, Stripe, Zendesk), we use a **Kafka REST Source Connector**. The connector cluster sits in a private subnet and routes outbound requests through a **NAT Gateway**. This allows the connector to securely "pull" data over the public internet while blocking any malicious inbound traffic to the Kafka cluster.

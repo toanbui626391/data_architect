@@ -23,13 +23,15 @@ The following diagram illustrates the flow of data from live applications throug
 
 ```mermaid
 flowchart LR
-    subgraph DataProducers [Event Producers]
+    subgraph PublicInternet [Public Internet]
         App["Mobile / Web Apps"]
-        Microservices["Backend Microservices"]
     end
 
     subgraph CustomerVPC [Customer AWS VPC]
         direction TB
+        APIGW["API Gateway / REST Proxy"]
+        Microservices["Backend Microservices"]
+        
         subgraph MessageBus [Kafka Platform: Streaming & Native DQ]
             Registry["Schema Registry <br>&#40;Strict Validation&#41;"]
             Kafka["Apache Kafka / MSK"]
@@ -48,7 +50,8 @@ flowchart LR
         Snowsight["Snowsight Dashboards & Alerts <br>&#40;Native Monitoring&#41;"]
     end
 
-    App -->|JSON Events| Registry
+    App -->|HTTPS POST| APIGW
+    APIGW -->|JSON Events| Registry
     Microservices -->|JSON Events| Registry
     Registry -->|Validated Payload| Kafka
     
@@ -249,3 +252,8 @@ Because Snowpipe Streaming moves data continuously from your AWS network (where 
     *   The public key is assigned to a dedicated `KAFKA_STREAMING_USER` in Snowflake.
     *   The private key is securely stored in AWS Secrets Manager (or HashiCorp Vault) and passed to the connector at runtime.
 *   **Least Privilege (RBAC):** The `KAFKA_STREAMING_USER` is assigned a dedicated role that only has `INSERT` privileges on the target Bronze tables. It cannot run `SELECT` statements or access downstream Silver/Gold data.
+
+### 10.3 Inbound Networking (Producers to Kafka)
+Securing data *into* Kafka is just as critical as securing data out to Snowflake. As shown in the diagram, different producers use different network paths:
+1.  **Backend Microservices (Private Network):** Internal microservices live within the same Customer VPC (or a peered VPC). They communicate directly with the Kafka brokers over the private AWS backbone using standard Kafka producer SDKs.
+2.  **Mobile & Web Apps (Public Internet):** It is a massive security anti-pattern to expose Kafka brokers directly to the public internet. Instead, mobile apps push data via standard HTTPS `POST` requests to an **API Gateway** (e.g., AWS API Gateway or Confluent REST Proxy) hosted in a public subnet/DMZ. The API Gateway authenticates the user, converts the REST payload, and securely writes it to the internal Schema Registry/Kafka topics on the private network.

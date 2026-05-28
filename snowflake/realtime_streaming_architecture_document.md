@@ -28,17 +28,20 @@ flowchart LR
         Microservices["Backend Microservices"]
     end
 
-    subgraph MessageBus [Kafka Platform: Streaming & Native DQ]
+    subgraph CustomerVPC [Customer AWS VPC]
         direction TB
-        Registry["Schema Registry <br>&#40;Strict Validation&#41;"]
-        Kafka["Apache Kafka / MSK"]
-        DLT[("Dead Letter Topic <br>&#40;DLQ Auditing&#41;")]
-        C3["Confluent Control Center <br>&#40;Native Monitoring&#41;"]
+        subgraph MessageBus [Kafka Platform: Streaming & Native DQ]
+            Registry["Schema Registry <br>&#40;Strict Validation&#41;"]
+            Kafka["Apache Kafka / MSK"]
+            DLT[("Dead Letter Topic <br>&#40;DLQ Auditing&#41;")]
+            C3["Confluent Control Center <br>&#40;Native Monitoring&#41;"]
+        end
+        Connector["Snowflake Kafka Connector <br>&#40;Streaming API&#41;"]
+        VPCE["AWS PrivateLink Endpoint <br>&#40;Snowflake&#41;"]
     end
 
-    subgraph Snowflake [Snowflake Data Cloud: Native Ops]
+    subgraph Snowflake [Snowflake Managed VPC]
         direction TB
-        Connector["Snowflake Kafka Connector <br>&#40;Streaming API&#41;"]
         Table[("Raw Bronze Table")]
         DT["Dynamic Table <br>&#40;Lag = 1 MINUTE&#41;"]
         Silver[("Clean Silver Table")]
@@ -50,11 +53,12 @@ flowchart LR
     Registry -->|Validated Payload| Kafka
     
     Kafka -->|Sub-second write| Connector
+    Connector -->|HTTPS Request| VPCE
     
     %% Handling Discrepancies at the Connector
     Connector -->|Malformed Record| DLT
-    Connector -->|Valid Record Insert| Table
-    Connector -.->|Tombstone / Deletes| Table
+    VPCE -->|Valid Record Insert| Table
+    VPCE -.->|Tombstone / Deletes| Table
     
     Table -.->|Continuous Refresh| DT
     DT --> Silver
@@ -69,11 +73,13 @@ flowchart LR
     classDef bad fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     classDef process fill:#dae8fc,stroke:#6c8ebf,stroke-width:1px,color:#000;
     classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
+    classDef network fill:#f9f9f9,stroke:#666,stroke-width:2px,color:#000,stroke-dasharray: 5 5;
     
     class Table,Silver storage;
     class DLT bad;
-    class Connector,DT,Registry process;
+    class Connector,DT,Registry,Kafka,VPCE process;
     class C3,Snowsight monitor;
+    class CustomerVPC,Snowflake network;
 ```
 
 ---
@@ -224,3 +230,22 @@ Because the data is flowing directly from the message bus into Snowflake via an 
 Once the data successfully lands in the Bronze table, Data Quality monitoring shifts entirely to Snowflake Snowsight.
 *   **Schema Evolution Alerts:** If `ENABLE_SCHEMA_EVOLUTION = TRUE`, configure a Snowflake Alert to trigger whenever a new column appears in the Bronze table. This notifies analysts that new fields are available for downstream modeling.
 *   **Variant Parsing Failures:** If you are using the `VARIANT` fallback approach (schemaless JSON), write a scheduled alert to count rows where `TRY_CAST(record_content:critical_id AS INT) IS NULL`. This flags records that landed successfully but are structurally broken for business use.
+
+---
+
+## 10. AWS Networking & Security Architecture
+
+Because Snowpipe Streaming moves data continuously from your AWS network (where Kafka lives) into Snowflake’s managed network, strict network and identity boundaries must be enforced.
+
+### 10.1 Network Isolation (AWS PrivateLink)
+*   **The Problem:** The Snowflake Kafka Connector communicates with Snowflake via the Snowpipe Streaming API (HTTPS). By default, this traffic would route over the public internet.
+*   **The Solution:** We deploy an **AWS PrivateLink Endpoint** for Snowflake inside the Customer VPC (as shown in the diagram). 
+*   **Configuration:** The Kafka Connector is configured to point its API requests to the private VPCE DNS name. This ensures all streaming payloads traverse the private AWS backbone, completely eliminating the risk of public data exfiltration.
+*   **Network Policies:** Inside Snowflake, we configure a `NETWORK_POLICY` to strictly allow incoming streaming connections *only* from the AWS PrivateLink Endpoint ID.
+
+### 10.2 Identity & Authentication (Key-Pair Auth)
+*   **No Passwords:** The Snowpipe Streaming API strictly prohibits standard username/password authentication for programmatic access.
+*   **RSA Key-Pair:** The Snowflake Kafka Connector is authenticated using an RSA Key-Pair. 
+    *   The public key is assigned to a dedicated `KAFKA_STREAMING_USER` in Snowflake.
+    *   The private key is securely stored in AWS Secrets Manager (or HashiCorp Vault) and passed to the connector at runtime.
+*   **Least Privilege (RBAC):** The `KAFKA_STREAMING_USER` is assigned a dedicated role that only has `INSERT` privileges on the target Bronze tables. It cannot run `SELECT` statements or access downstream Silver/Gold data.

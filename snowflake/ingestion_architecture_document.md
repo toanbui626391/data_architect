@@ -75,11 +75,11 @@ The backbone of our batch/micro-batch ingestion strategy is **Snowpipe with Auto
 For massive historical migrations where event-driven loading isn't feasible, we utilize the standard `COPY INTO` command using a dedicated Virtual Warehouse.
 
 ### 4.3 Preferred File Format Guidelines
-| Format | Recommendation | Notes |
-|---|---|---|
-| **Parquet** | ✅ Preferred | Columnar, compressed, native type preservation. Best for schema evolution. |
-| **JSON / NDJSON** | ✅ Acceptable | Ideal for nested data loaded into `VARIANT` columns. |
-| **CSV** | ⚠️ Fallback Only | No type info; brittle schema mapping. Avoid if possible. |
+| Format            | Recommendation  | Notes                                                                      |
+| ----------------- | --------------- | -------------------------------------------------------------------------- |
+| **Parquet**       | ✅ Preferred     | Columnar, compressed, native type preservation. Best for schema evolution. |
+| **JSON / NDJSON** | ✅ Acceptable    | Ideal for nested data loaded into `VARIANT` columns.                       |
+| **CSV**           | ⚠️ Fallback Only | No type info; brittle schema mapping. Avoid if possible.                   |
 
 ---
 

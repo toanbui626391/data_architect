@@ -42,6 +42,7 @@ flowchart TD
             CDCConn["Debezium CDC Connector"]
             SchemaReg["Schema Registry <br>&#40;Avro / Protobuf&#41;"]
             Kafka["Apache Kafka"]
+            KafkaDLQ[("Connect DLQ Topic <br>&#40;Serialization Errors&#41;")]
             CC["Confluent Control Center <br>&#40;Kafka Monitoring&#41;"]
         end
 
@@ -82,6 +83,7 @@ flowchart TD
     PartnerConn --> SchemaReg
     CDCConn --> SchemaReg
     SchemaReg -->|Validated Schema| Kafka
+    SchemaReg -.->|Conversion Error| KafkaDLQ
     Kafka --> Spark
     
     %% Data Pipeline Flow
@@ -96,7 +98,7 @@ flowchart TD
 
     %% Kafka-Side Monitoring &#40;Kafka ↔ Spark leg&#41;
     Kafka -.->|Consumer Lag / Throughput Drop| CC
-    SchemaReg -.->|Schema Rejections| CC
+    KafkaDLQ -.->|DLQ Topic Count > 0| CC
     CC -.->|Lag / Throughput Alert| Notification
 
     %% Spark-to-Bronze Monitoring
@@ -122,7 +124,7 @@ flowchart TD
     
     class InternalDB,PartnerDB,Bronze,Silver,Gold storage;
     class SaaSConn,PartnerConn,CDCConn,SchemaReg,Kafka,Spark,DLT process;
-    class DLQ bad;
+    class DLQ,KafkaDLQ bad;
     class CC,EventLog,SQLAlert monitor;
     class CustomerVPC,ControlPlane,VPCE,NetworkEgress network;
     class Notification alert;
@@ -222,13 +224,19 @@ We use SQL-native `CONSTRAINT` clauses in DLT Silver tables to enforce data cont
       ON VIOLATION FAIL UPDATE
     ```
 
-### 6.4 The Quarantine Pattern (DLQ)
-Instead of simply dropping bad records, enterprise architectures demand a Dead Letter Queue (DLQ). In DLT, we implement a **Quarantine Pattern**:
+### 6.4 Kafka Connect DLQ (Structural / Serialization Failures)
+Before data ever reaches Databricks, it must be serialized by Kafka Connect. If a source database contains corrupted bytes or unsupported data types that the connector literally cannot parse into an Avro/Protobuf payload, a catastrophic failure occurs.
+*   **The Connector Setting:** We configure all Kafka Connectors with `errors.tolerance = all`. This prevents a single bad payload from crashing the entire ingestion task.
+*   **The Kafka DLQ Topic:** Unparseable payloads are routed immediately to a dedicated Kafka DLQ Topic (e.g., `src-orders-dlq`).
+*   **Alerting:** Confluent Control Center monitors this topic. If the message count is `> 0`, an alert fires to Slack/PagerDuty so Platform Engineers can investigate the corrupted source payload. Databricks pipelines are completely isolated from these structural failures.
+
+### 6.5 The Databricks Quarantine Pattern (Business Logic Failures)
+Instead of simply dropping logically bad records (e.g. valid JSON, but missing a required User ID), enterprise architectures demand a Dead Letter Queue (DLQ). In DLT, we implement a **Quarantine Pattern**:
 *   A downstream DLT table is explicitly configured to capture the inverse of the Silver expectations. 
 *   All malformed records (e.g., where `user_id IS NULL`) are routed to a `silver_quarantine` Delta table.
 *   **DLQ Alerting:** A Databricks SQL Alert continuously monitors the DLQ. If the ratio of quarantined records to total records exceeds 1%, a warning is fired to Slack.
 
-### 6.5 Data Quality Requirements per Medallion Layer
+### 6.6 Data Quality Requirements per Medallion Layer
 To maintain trust without creating brittle pipelines, data quality rules must be applied progressively across the layers:
 
 1.  **Bronze Layer (Capture Everything):**

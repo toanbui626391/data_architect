@@ -132,7 +132,56 @@ The Gold layer is designed for business consumption using standard Kimball metho
 
 ## 7. Operational Excellence & Data Quality
 
-A robust, native platform architecture requires built-in observability.
+A robust, native platform architecture requires built-in observability. The following diagram illustrates how Snowflake's native monitoring, Data Metric Functions (DMFs), and Alerting mechanisms work together to ensure pipeline health.
+
+```mermaid
+flowchart TD
+    subgraph Pipeline [Data Pipeline]
+        direction LR
+        Bronze[(Bronze)] --> Silver[(Silver)]
+        Silver --> Gold[(Gold)]
+    end
+
+    subgraph NativeDQ [Data Quality &#40;DMFs&#41;]
+        direction TB
+        DMF_Fresh[DMF: Freshness]
+        DMF_Null[DMF: Null Count]
+    end
+
+    subgraph NativeMon [Native Pipeline Monitoring]
+        direction TB
+        HistView[DYNAMIC_TABLE_REFRESH_HISTORY]
+        AlertObj[Snowflake ALERT Object]
+    end
+
+    subgraph External [External Notification]
+        NotifInt[Notification Integration]
+        Slack[Slack / Email / PagerDuty]
+    end
+
+    %% Data Quality Flow
+    Silver -.->|Evaluates| DMF_Null
+    Gold -.->|Evaluates| DMF_Fresh
+    DMF_Null -->|Failures| AlertObj
+    DMF_Fresh -->|Failures| AlertObj
+
+    %% Pipeline Monitoring Flow
+    Pipeline -.->|Logs State| HistView
+    HistView -.->|Filter FAILED| AlertObj
+
+    %% Alert Routing
+    AlertObj -->|Triggers Notification| NotifInt
+    NotifInt --> Slack
+
+    %% Styling
+    classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
+    classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
+    classDef alert fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
+    
+    class Bronze,Silver,Gold storage;
+    class DMF_Fresh,DMF_Null,HistView monitor;
+    class AlertObj,NotifInt,Slack alert;
+```
 
 ### 7.1 Data Quality via Data Metric Functions (DMFs)
 Snowflake's native Data Metric Functions are utilized to proactively monitor data health without external tools.

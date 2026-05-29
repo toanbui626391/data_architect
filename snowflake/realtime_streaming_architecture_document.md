@@ -19,7 +19,7 @@ Crucially, this document defines how to maintain robustness in a live stream by 
 
 ## 3. The Real-Time Architecture
 
-The following diagram illustrates the flow of data from live applications through the message bus directly into Snowflake, including how malformed records are handled via a Dead Letter Topic (DLT).
+The following diagram illustrates the flow of data from live applications through the message bus directly into Snowflake, including how malformed records are handled via a Dead Letter Queue (DLQ).
 
 ```mermaid
 flowchart LR
@@ -43,17 +43,17 @@ flowchart LR
             TG["VPC Peering / <br>Transit Gateway"]
         end
         
-        subgraph MessageBus [Kafka Platform: Streaming & Native DQ]
+        subgraph MessageBus [Kafka Platform &#40;incl. Kafka Connect&#41;]
             SaaSConn["SaaS Source Connector"]
             PartnerConn["JDBC Source Connector"]
             CDCConn["Debezium CDC Connector"]
             
             Registry["Schema Registry <br>&#40;Strict Validation&#41;"]
             Kafka["Apache Kafka / MSK"]
-            DLT[("Dead Letter Topic <br>&#40;DLQ Auditing&#41;")]
+            Connector["Snowflake Sink Connector <br>&#40;Streaming API&#41;"]
+            DLQ[("Dead Letter Queue <br>&#40;DLQ Auditing&#41;")]
             C3["Confluent Control Center <br>&#40;Native Monitoring&#41;"]
         end
-        Connector["Snowflake Kafka Connector <br>&#40;Streaming API&#41;"]
         VPCE["AWS PrivateLink Endpoint <br>&#40;Snowflake&#41;"]
     end
 
@@ -62,6 +62,7 @@ flowchart LR
         Table[("Raw Bronze Table")]
         DT["Dynamic Table <br>&#40;Lag = 1 MINUTE&#41;"]
         Silver[("Clean Silver Table")]
+        Gold[("Gold Aggregates")]
         Snowsight["Snowsight Dashboards & Alerts <br>&#40;Native Monitoring&#41;"]
     end
 
@@ -80,21 +81,22 @@ flowchart LR
     CDCConn -->|JSON Events| Registry
     
     Registry -->|Validated Payload| Kafka
-    
     Kafka -->|Sub-second write| Connector
-    Connector -->|HTTPS Request| VPCE
+    Connector -->|HTTPS via PrivateLink| VPCE
     
-    %% Handling Discrepancies at the Connector
-    Connector -->|Malformed Record| DLT
+    %% Error Handling
+    Connector -->|Malformed Record| DLQ
     VPCE -->|Valid Record Insert| Table
     VPCE -.->|Tombstone / Deletes| Table
     
+    %% Downstream
     Table -.->|Continuous Refresh| DT
     DT --> Silver
+    Silver --> Gold
     
     %% Native Observability Links
     Connector -.->|Offset Lag| C3
-    DLT -.->|Alerting| C3
+    DLQ -.->|Alerting| C3
     Table -.->|Ingestion Metrics| Snowsight
 
     %% Styling
@@ -104,8 +106,8 @@ flowchart LR
     classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
     classDef network fill:#f9f9f9,stroke:#666,stroke-width:2px,color:#000,stroke-dasharray: 5 5;
     
-    class Table,Silver,InternalDB,PartnerDB storage;
-    class DLT bad;
+    class Table,Silver,Gold,InternalDB,PartnerDB storage;
+    class DLQ bad;
     class Connector,DT,Registry,Kafka,VPCE,SaaSConn,PartnerConn,CDCConn process;
     class C3,Snowsight monitor;
     class CustomerVPC,Snowflake,NetworkEgress network;
@@ -139,7 +141,9 @@ When using the Kafka Connector paired with a Schema Registry (e.g., Confluent Sc
     2.  The Kafka Connector configuration must have `snowflake.ingestion.method = SNOWPIPE_STREAMING` and `snowflake.enable.schematization = TRUE`.
 *   **Behavior (Added Columns):** When the upstream microservice registers a new Avro schema version with a new column, the Kafka Connector detects it, instructs Snowflake to run an `ALTER TABLE ADD COLUMN`, and continues streaming without interruption.
 *   **Behavior (Deleted Columns):** Snowflake will **not** physically drop the column from the table (this preserves historical data). Instead, it automatically handles the missing data by inserting `NULL` into that column for all new streaming records. It also automatically drops the `NOT NULL` constraint if the column previously had one.
-*   **Behavior (Changed Data Types):** Snowflake's native evolution does **not** support altering data types (e.g., changing an `INT` to a `STRING`). If a schema registry change modifies a data type, the connector will throw a casting error, and the record will be routed to the Dead Letter Topic (DLT) for engineering intervention.
+*   **Behavior (Changed Data Types):** Snowflake's native evolution does **not** support altering data types (e.g., changing an `INT` to a `STRING`). If a schema registry change modifies a data type, the connector will throw a casting error, and the record will be routed to the Dead Letter Queue (DLQ) for engineering intervention.
+
+> **Debezium CDC Envelope Note:** Debezium wraps change events in a structured envelope: `{"before": {...}, "after": {...}, "op": "u", "ts_ms": 123}`. Dynamic Tables reading from CDC Bronze tables must query `record_content:after` for inserts/updates and check `record_content:op = 'd'` for deletes — not the root payload.
 
 ### 5.2 The "VARIANT" Fallback (Schema-on-Read Streaming)
 If you are streaming schemaless JSON without a Schema Registry, strict table schematization will fail when new fields appear. 
@@ -153,7 +157,7 @@ If you are streaming schemaless JSON without a Schema Registry, strict table sch
 
 If a hard discrepancy occurs (e.g., an upstream service sends a fundamentally broken payload that violates the schema registry), the streaming connector must isolate the failure. **A bad record must never halt the live streaming pipeline.**
 
-### 6.1 The Dead Letter Topic (DLT) Pattern
+### 6.1 The Dead Letter Queue (DLQ) Pattern
 Unlike batch file ingestion where Snowflake handles the Dead Letter Queue, in a streaming architecture, the **Kafka Connector handles the quarantine process** before the data reaches Snowflake.
 
 *   **Implementation Configuration:**
@@ -164,7 +168,7 @@ Unlike batch file ingestion where Snowflake handles the Dead Letter Queue, in a 
     errors.deadletterqueue.context.headers.enable = true
     ```
 *   **Behavior:** When the connector attempts to cast a malformed JSON payload and fails, it does not crash. It skips the message, writes the raw malformed payload and the error reason to the `snowflake_ingest_dlq` topic, and continues streaming the healthy records into Snowflake.
-*   **Alerting:** The Data Engineering team natively monitors the DLT topic via the Kafka UI to investigate application drift.
+*   **Alerting:** The Data Engineering team natively monitors the DLQ topic via Confluent Control Center to investigate application drift.
 
 ### 6.2 Top Causes of Bad Records & Remediation Strategy
 
@@ -235,13 +239,13 @@ To keep the architecture simple, easy to maintain, and free of third-party depen
 You monitor metrics directly within the platforms where the compute is happening:
 
 *   **Kafka Side (Confluent Control Center):** We utilize Confluent Control Center (or your native Kafka UI) to monitor the Snowflake Kafka Connector. You must configure alerts for the following critical metrics:
-    *   **Consumer Lag (`records-lag-max`):** Alert if lag continuously grows over a 5-minute window, indicating the connector cannot keep up with event volume (requires scaling `tasks.max` or tuning buffers).
+    *   **Consumer Lag (`records-lag-max`):** Alert if lag continuously grows over a 5-minute window. **Response:** Increase `tasks.max` in the Connector config. Each task reads one Kafka partition in parallel — ensure the topic has at least as many partitions as your target `tasks.max`.
     *   **Connector State (`connector-state`):** Alert immediately if the status changes to `FAILED` (usually indicates authentication failure or severe misconfiguration).
     *   **Throughput (`records-consumed-rate`):** Alert if throughput unexpectedly drops to `0` during business hours (indicates a silent upstream producer failure).
 *   **Snowflake Side (Snowsight Dashboards):** We build operational dashboards directly inside Snowflake using **Snowsight**. You must configure alerts for the following critical metrics:
-    *   **Streaming Client Health:** Query `SNOWPIPE_STREAMING_CLIENT_HISTORY`. Alert if active clients suddenly drop to `0` (indicates the Kafka Connector was shut down or lost network access to Snowflake).
-    *   **Ingestion Latency & Throughput:** Query `SNOWPIPE_STREAMING_FILE_MIGRATION_HISTORY`. Track `RECORD_COUNT` and alert if the average ingestion latency spikes, which indicates Snowflake is struggling to flush buffers to micro-partitions.
-    *   **Dynamic Table Lag:** Query `DYNAMIC_TABLE_REFRESH_HISTORY`. Streaming fast into Bronze is useless if transformations are slow. Alert if the `ACTUAL_LAG` exceeds your defined `TARGET_LAG` (e.g., > 1 minute), which indicates your Virtual Warehouse is undersized.
+    *   **Streaming Client Health:** Query `SNOWFLAKE.ACCOUNT_USAGE.SNOWPIPE_STREAMING_CLIENT_HISTORY`. Alert if active clients suddenly drop to `0` (indicates the Kafka Connector was shut down or lost network access to Snowflake).
+    *   **Ingestion Latency & Throughput:** Query `SNOWFLAKE.ACCOUNT_USAGE.SNOWPIPE_STREAMING_FILE_MIGRATION_HISTORY`. Track `RECORD_COUNT` and alert if the average ingestion latency spikes, which indicates Snowflake is struggling to flush buffers to micro-partitions.
+    *   **Dynamic Table Lag:** Query `SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY`. Streaming fast into Bronze is useless if transformations are slow. Alert if the `ACTUAL_LAG` exceeds your defined `TARGET_LAG` (e.g., > 1 minute), which indicates your Virtual Warehouse is undersized.
 
 ### 9.2 Data Quality: Pre-Bronze Validation (Kafka)
 Because the data is flowing directly from the message bus into Snowflake via an API, you cannot execute complex SQL transformations *before* it lands in Bronze. Data Quality in this specific leg relies on strict upstream enforcement.
@@ -252,7 +256,7 @@ Because the data is flowing directly from the message bus into Snowflake via an 
     *   `behavior.on.null.values = IGNORE` (Drops the record completely).
     *   `behavior.on.null.values = DEFAULT` (Passes the NULL into the Snowflake Bronze table, allowing downstream Dynamic Tables to process the delete operation).
     *   **Alert to Configure:** Monitor for **Tombstone/Null Payload Spikes**. A sudden, massive spike (e.g., 500% above baseline) usually indicates an upstream application bug accidentally deleting records en masse.
-3.  **Dead Letter Queue (DLQ) Auditing:** As outlined in Section 6.1, any record that cannot be parsed or cast into the Bronze table is diverted to a Kafka DLQ topic.
+3.  **Dead Letter Queue (DLQ) Auditing:** As outlined in Section 6.1, any record that cannot be parsed or cast into the Bronze table is diverted to the Kafka DLQ topic.
     *   **Alert to Configure:** Alert immediately if **DLQ Message Count > 0** over a 5-minute window. Data Quality is only maintained if this topic is actively monitored via Confluent Control Center, allowing engineers to triage casting errors natively.
 
 ### 9.3 Data Quality: Post-Landing Alerts (Snowsight)
@@ -282,6 +286,15 @@ Because Snowpipe Streaming moves data continuously from your AWS network (where 
 ### 10.3 Inbound Networking (Hybrid Multi-Source Connector Pattern)
 To keep the architecture simple and easy to maintain, we **do not** write custom Kafka Producer code or deploy custom REST Proxies. Instead, we rely entirely on a centralized **Kafka Connect** cluster to pull data from all internal and external sources.
 
-1.  **Internal VPC Applications (CDC):** Internal mobile apps and web browsers communicate with backend microservices via standard HTTPS. These microservices write to an internal operational database. A **Debezium CDC Source Connector** reads the database transaction logs and streams changes into Kafka over the private AWS backbone.
-2.  **External Peered VPC Applications:** For databases or applications hosted in a partner's VPC (or a different cloud provider), we establish a **VPC Peering Connection** (or AWS Transit Gateway). A **JDBC Source Connector** securely pulls data across the peering connection without traversing the public internet.
-3.  **Public Internet / SaaS Applications:** To ingest data from external SaaS providers (e.g., Salesforce, Stripe, Zendesk), we use a **Kafka REST Source Connector**. The connector cluster sits in a private subnet and routes outbound requests through a **NAT Gateway**. This allows the connector to securely "pull" data over the public internet while blocking any malicious inbound traffic to the Kafka cluster.
+1.  **Internal VPC Applications (CDC):** Internal microservices write to an operational database inside the Customer VPC. A **Debezium CDC Source Connector** reads the database transaction logs and streams changes into Kafka over the private AWS backbone. Debezium events have **at-least-once** delivery semantics — downstream Dynamic Tables on Silver must apply deduplication: `QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY ts_ms DESC) = 1`.
+2.  **External Peered VPC Applications:** For databases hosted in a partner's VPC, we establish a **VPC Peering Connection** (or AWS Transit Gateway). A **JDBC Source Connector** securely pulls data across the peering connection without traversing the public internet.
+3.  **Public Internet / SaaS Applications:** For external SaaS providers (e.g., Salesforce, Stripe), a **SaaS Source Connector** routes outbound requests through a **NAT Gateway**. This allows the connector to securely pull from public APIs while blocking all inbound internet traffic to the Kafka cluster.
+
+---
+
+## 11. Downstream Consumers (Gold Layer)
+
+The pipeline does not end at Silver. Analytics Engineering teams build the **Gold Layer** on top of Silver using additional **Dynamic Tables** or **Materialized Views**.
+*   **Ownership:** Gold tables are owned by the Analytics Engineering team, not Data Engineering. This enforces a clean separation between ingestion concerns and business logic.
+*   **Pattern:** Gold tables aggregate and join Silver data into business-ready metrics (e.g., daily revenue, active user counts). They use `TARGET_LAG = 'DOWNSTREAM'` to refresh only when their upstream Silver table refreshes, avoiding redundant compute.
+*   **Consumers:** BI tools (Tableau, Looker), operational dashboards, and data science models query exclusively from the Gold layer, never from Bronze or Silver directly.

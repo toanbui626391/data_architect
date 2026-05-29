@@ -13,52 +13,78 @@ The following diagram illustrates how data flows continuously from various sourc
 
 ```mermaid
 flowchart TD
-    subgraph DataSources [Multi-Source Ingestion]
+    %% External Sources
+    subgraph DataSources [External Sources]
         direction TB
-        Files[("Cloud Storage <br>&#40;S3 / ADLS Gen2 / GCS&#41; <br> JSON/CSV/Parquet")]
-        Kafka(("Message Bus <br>&#40;Kafka / Kinesis / EventHubs&#41; <br> Streaming Events"))
+        Files[("Cloud Storage Stage <br>&#40;S3 / ADLS&#41;")]
+        Kafka(("Kafka / EventHubs <br>&#40;Message Bus&#41;")]
     end
 
-    subgraph DatabricksLakehouse [Databricks: Delta Live Tables Pipeline]
+    %% Security Boundary
+    subgraph CustomerVPC [Customer VPC / Data Plane]
+        direction TB
         
-        subgraph IngestionEngine [Ingestion Layer]
-            AL["Databricks Auto Loader <br>&#40;cloudFiles&#41;"]
-            Spark["Structured Streaming <br>&#40;Kafka Connector&#41;"]
-            Files -. Cloud Event/SQS .-> AL
-            Kafka --> Spark
+        %% Ingestion Compute
+        subgraph Compute [Databricks Compute Clusters]
+            direction TB
+            AL["Auto Loader <br>&#40;Files&#41;"]
+            Spark["Structured Streaming <br>&#40;Kafka&#41;"]
         end
 
-        subgraph Bronze [Bronze Layer - Raw]
-            BronzeAL[("Bronze Delta Table <br>&#40;Raw Files&#41;")]
-            BronzeKaf[("Bronze Delta Table <br>&#40;Raw Events&#41;")]
-            AL -->|Append Only| BronzeAL
-            Spark -->|Append Only| BronzeKaf
-        end
-
-        subgraph Silver [Silver Layer - Cleansed & Validated]
-            SilverDT[("Silver Delta Table <br>&#40;Cleansed&#41;")]
-            DLQ[("Quarantine Table <br>&#40;DLQ&#41;")]
-            
-            BronzeAL -->|DLT Expectations| SilverDT
-            BronzeKaf -->|DLT Expectations| SilverDT
-            BronzeAL -.->|Fails Expectation| DLQ
-            BronzeKaf -.->|Fails Expectation| DLQ
-        end
-
-        subgraph Gold [Gold Layer - Aggregated]
-            GoldDT[("Gold Delta Table <br>&#40;Business Aggregates&#41;")]
-            SilverDT -->|Streaming Aggregation| GoldDT
+        %% Medallion Storage
+        subgraph Storage [Delta Lake / Cloud Storage]
+            direction TB
+            Bronze[("Bronze <br>&#40;Raw&#41;")]
+            Silver[("Silver <br>&#40;Cleansed&#41;")]
+            Gold[("Gold <br>&#40;Aggregates&#41;")]
+            DLQ[("Quarantine <br>&#40;DLQ&#41;")]
         end
     end
 
-    %% Style classes
+    %% Databricks Control Plane (Monitoring / DQ)
+    subgraph ControlPlane [Databricks Control Plane]
+        direction TB
+        DLT["Delta Live Tables <br>&#40;Orchestration & DQ&#41;"]
+        EventLog["DLT Event Log <br>&#40;System Tables&#41;"]
+        Alerts["Databricks Alerts <br>&#40;Email/Slack&#41;"]
+    end
+
+    %% Security Routes
+    VPCE["PrivateLink / Secure Cluster Connectivity"]
+
+    %% Flow: Sources -> Compute
+    Files -.->|IAM/Managed Identity| AL
+    Kafka -.->|mTLS/SASL| Spark
+    
+    %% Flow: Compute -> Storage (via DLT)
+    AL --> Bronze
+    Spark --> Bronze
+    
+    %% Flow: DLT Pipeline & Data Quality
+    Bronze -->|DLT Expectations| Silver
+    Bronze -.->|Fails Expectation| DLQ
+    Silver --> Gold
+
+    %% Flow: Monitoring & Networking
+    Compute <-->|No Public IPs| VPCE
+    VPCE <--> ControlPlane
+    
+    %% DQ and Alerting
+    DLT -.->|Logs Metrics & DQ Failures| EventLog
+    EventLog -.->|Triggers| Alerts
+
+    %% Styling
     classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
     classDef process fill:#dae8fc,stroke:#6c8ebf,stroke-width:1px,color:#000;
     classDef bad fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
+    classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
+    classDef network fill:#f9f9f9,stroke:#666,stroke-width:2px,color:#000,stroke-dasharray: 5 5;
     
-    class Files,Kafka,BronzeAL,BronzeKaf,SilverDT,GoldDT storage;
-    class AL,Spark process;
+    class Files,Kafka,Bronze,Silver,Gold storage;
+    class AL,Spark,DLT process;
     class DLQ bad;
+    class EventLog,Alerts monitor;
+    class CustomerVPC,ControlPlane,VPCE network;
 ```
 
 ---

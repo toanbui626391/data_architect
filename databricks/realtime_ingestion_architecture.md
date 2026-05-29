@@ -54,7 +54,6 @@ flowchart TD
             Bronze[("Bronze <br>&#40;Raw&#41;")]
             Silver[("Silver <br>&#40;Cleansed&#41;")]
             Gold[("Gold <br>&#40;Aggregates&#41;")]
-            DLQ[("Quarantine <br>&#40;DLQ&#41;")]
         end
     end
 
@@ -89,7 +88,6 @@ flowchart TD
     %% Data Pipeline Flow
     Spark --> Bronze
     Bronze -->|DLT Expectations| Silver
-    Bronze -.->|Fails Expectation| DLQ
     Silver --> Gold
 
     %% Networking
@@ -110,8 +108,7 @@ flowchart TD
     Silver -.->|DQ Constraint Violations| EventLog
 
     %% Alerting
-    DLQ -.->|DLQ Count > 0| SQLAlert
-    EventLog -.->|Queries on FAILED State| SQLAlert
+    EventLog -.->|Queries on FAILED State & DQ Warnings| SQLAlert
     SQLAlert -->|Webhook| Notification
 
     %% Styling
@@ -124,7 +121,7 @@ flowchart TD
     
     class InternalDB,PartnerDB,Bronze,Silver,Gold storage;
     class SaaSConn,PartnerConn,CDCConn,SchemaReg,Kafka,Spark,DLT process;
-    class DLQ,KafkaDLQ bad;
+    class KafkaDLQ bad;
     class CC,EventLog,SQLAlert monitor;
     class CustomerVPC,ControlPlane,VPCE,NetworkEgress network;
     class Notification alert;
@@ -203,21 +200,15 @@ Databricks exposes deep pipeline metrics natively via the **DLT Event Log** (Sys
 *   **Data Staleness (Freshness):** Queries the Bronze table to compare the payload's `event_timestamp` against the `_ingestion_timestamp`. Alerts if staleness exceeds an acceptable threshold (e.g., 2 minutes).
 
 ### 6.3 Data Quality Enforcement (DLT Expectations)
-We use SQL-native `CONSTRAINT` clauses in DLT Silver tables to enforce data contracts:
+We use SQL-native `CONSTRAINT` clauses in DLT Silver tables to enforce data contracts. Following our design principle to retain all data and alert on issues rather than dropping records silently, we primarily use the `WARN` constraint:
 
-1.  **Retain and Alert (`ON VIOLATION WARN`):** Record loads but violation is logged to the DLT Event Log for alerting.
-    ```sql
-    CONSTRAINT valid_timestamp
-      EXPECT (event_timestamp > '2020-01-01')
-      ON VIOLATION WARN
-    ```
-2.  **Drop Bad Data (`ON VIOLATION DROP ROW`):** Record is dropped from Silver and captured by the Quarantine table.
+1.  **Retain and Alert (`ON VIOLATION WARN`):** The record is loaded into Silver, but the violation is logged to the DLT Event Log for alerting. This prevents data loss while maintaining strict observability over data quality.
     ```sql
     CONSTRAINT valid_user_id
       EXPECT (user_id IS NOT NULL)
-      ON VIOLATION DROP ROW
+      ON VIOLATION WARN
     ```
-3.  **Fail the Pipeline (`ON VIOLATION FAIL UPDATE`):** Catastrophic contract violation. Pipeline halts immediately to prevent downstream corruption.
+2.  **Fail the Pipeline (`ON VIOLATION FAIL UPDATE`):** Used only for catastrophic contract violations. The pipeline halts immediately to prevent downstream corruption.
     ```sql
     CONSTRAINT valid_order_total
       EXPECT (order_total >= 0)
@@ -230,11 +221,9 @@ Before data ever reaches Databricks, it must be serialized by Kafka Connect. If 
 *   **The Kafka DLQ Topic:** Unparseable payloads are routed immediately to a dedicated Kafka DLQ Topic (e.g., `src-orders-dlq`).
 *   **Alerting:** Confluent Control Center monitors this topic. If the message count is `> 0`, an alert fires to Slack/PagerDuty so Platform Engineers can investigate the corrupted source payload. Databricks pipelines are completely isolated from these structural failures.
 
-### 6.5 The Databricks Quarantine Pattern (Business Logic Failures)
-Instead of simply dropping logically bad records (e.g. valid JSON, but missing a required User ID), enterprise architectures demand a Dead Letter Queue (DLQ). In DLT, we implement a **Quarantine Pattern**:
-*   A downstream DLT table is explicitly configured to capture the inverse of the Silver expectations. 
-*   All malformed records (e.g., where `user_id IS NULL`) are routed to a `silver_quarantine` Delta table.
-*   **DLQ Alerting:** A Databricks SQL Alert continuously monitors the DLQ. If the ratio of quarantined records to total records exceeds 1%, a warning is fired to Slack.
+### 6.5 Handling Business Logic Failures
+Instead of dropping logically bad records (e.g., valid JSON, but missing a required User ID) or routing them to a Dead Letter Queue (DLQ), we retain them in the Silver layer. By using `ON VIOLATION WARN`, all records flow through the pipeline, ensuring zero data loss while violations are captured in the DLT Event Log.
+*   **Validation Alerting:** A Databricks SQL Alert continuously queries the Event Log. If the ratio of expectation failures (warnings) to total records processed exceeds a defined threshold (e.g., 1%), an alert is fired to Slack or PagerDuty.
 
 ### 6.6 Data Quality Requirements per Medallion Layer
 To maintain trust without creating brittle pipelines, data quality rules must be applied progressively across the layers:
@@ -243,9 +232,9 @@ To maintain trust without creating brittle pipelines, data quality rules must be
     *   **Requirement:** *Zero data loss.* Do not filter out bad business data here. 
     *   **Rules:** Enforce only structural integrity via the Kafka Schema Registry. Use Structured Streaming schema evolution to ensure unexpected (but valid) columns do not crash the pipeline. All raw events must be captured for auditability and replayability.
     *   **Monitoring Check:** Lightweight constraints on Bronze (e.g., `_kafka_offset IS NOT NULL`) verify ingestion metadata completeness.
-2.  **Silver Layer (Strict Conformance):**
-    *   **Requirement:** *Syntactic correctness and deduplication.*
-    *   **Rules:** Apply strict `ON VIOLATION DROP ROW` rules for Primary Keys (`id IS NOT NULL`) and deduplicate streams using `APPLY CHANGES INTO`. Filter out corrupted records into the DLQ (Quarantine). Data landing in Silver must be clean enough for Data Scientists to trust.
+2.  **Silver Layer (Syntactic Conformance):**
+    *   **Requirement:** *Syntactic correctness and deduplication without data loss.*
+    *   **Rules:** Deduplicate streams using `APPLY CHANGES INTO`. Apply `ON VIOLATION WARN` rules for business entity validity (e.g., `id IS NOT NULL`). All data is retained, but downstream consumers can filter based on metadata or trust the data while engineering investigates warnings.
 3.  **Gold Layer (Business Logic):**
     *   **Requirement:** *Semantic and business correctness.*
     *   **Rules:** Apply `ON VIOLATION WARN` rules to validate business constraints (e.g., `order_total > 0`, `status IN ('Pending', 'Shipped')`). Ensure foreign keys joining to dimension tables are valid. Failures here often indicate logic bugs rather than ingestion errors.
@@ -267,8 +256,8 @@ To ensure the Real-Time Ingestion Architecture runs efficiently, securely, and c
 *   **Change Data Feed (CDF) Prudence:** Only enable CDF on source tables if downstream pipelines actually require incremental upserts (`APPLY CHANGES INTO`). Leaving it on unnecessarily consumes excess storage.
 
 ### 7.3 Data Quality & Schema Operations
-*   **Monitor the DLQ:** Regularly query the Quarantine (DLQ) tables. A sudden spike indicates an upstream application has silently changed its data format, requiring engineering intervention.
-*   **Quarantine Remediation:** Set up an operational workflow to review the Quarantine tables weekly. Fix data anomalies at the source application whenever possible, rather than endlessly patching the ingestion pipeline.
+*   **Monitor DLT Warnings:** Regularly query the DLT Event Log for expectation violations. A sudden spike indicates an upstream application has silently changed its data format or business logic, requiring engineering intervention.
+*   **Data Quality Remediation:** Set up an operational workflow to review top constraint violations weekly. Fix data anomalies at the source application whenever possible, rather than endlessly patching the ingestion pipeline.
 
 ### 7.4 CI/CD and Deployment
 *   **Infrastructure as Code:** Deploy DLT pipelines exclusively using **Databricks Asset Bundles (DABs)** or Terraform. Never deploy or modify production pipelines manually via the UI.

@@ -40,7 +40,9 @@ flowchart TD
             SaaSConn["SaaS Source Connector"]
             PartnerConn["JDBC Source Connector"]
             CDCConn["Debezium CDC Connector"]
+            SchemaReg["Schema Registry <br>&#40;Avro / Protobuf&#41;"]
             Kafka["Apache Kafka"]
+            CC["Confluent Control Center <br>&#40;Kafka Monitoring&#41;"]
         end
 
         subgraph Compute [Databricks Compute Clusters]
@@ -55,12 +57,15 @@ flowchart TD
         end
     end
 
-    %% Databricks Control Plane (Monitoring / DQ)
-    subgraph ControlPlane [Databricks Control Plane]
+    %% Databricks Control Plane: Observability & Alerting
+    subgraph ControlPlane [Databricks Control Plane &#40;Observability&#41;]
         DLT["Delta Live Tables <br>&#40;Orchestration & DQ&#41;"]
-        EventLog["DLT Event Log"]
-        Alerts["Databricks Alerts"]
+        EventLog["DLT Event Log <br>&#40;System Tables&#41;"]
+        SQLAlert["Databricks SQL Alerts"]
     end
+
+    %% External Notification Target
+    Notification["Slack / PagerDuty"]
 
     %% Security Routes
     VPCE["PrivateLink"]
@@ -73,22 +78,39 @@ flowchart TD
     CDCConn -.->|Reads Tx Log| InternalDB
     
     %% Kafka Internal Flow
-    SaaSConn --> Kafka
-    PartnerConn --> Kafka
-    CDCConn --> Kafka
+    SaaSConn --> SchemaReg
+    PartnerConn --> SchemaReg
+    CDCConn --> SchemaReg
+    SchemaReg -->|Validated Schema| Kafka
     Kafka --> Spark
     
-    %% Flow: Compute -> Storage (via DLT)
+    %% Data Pipeline Flow
     Spark --> Bronze
     Bronze -->|DLT Expectations| Silver
     Bronze -.->|Fails Expectation| DLQ
     Silver --> Gold
 
-    %% Flow: Monitoring & Networking
+    %% Networking
     Compute <-->|No Public IPs| VPCE
     VPCE <--> ControlPlane
-    DLT -.->|Logs Metrics & DQ Failures| EventLog
-    EventLog -.->|Triggers| Alerts
+
+    %% Kafka-Side Monitoring &#40;Kafka ↔ Spark leg&#41;
+    Kafka -.->|Consumer Lag / Throughput Drop| CC
+    SchemaReg -.->|Schema Rejections| CC
+    CC -.->|Lag / Throughput Alert| Notification
+
+    %% Spark-to-Bronze Monitoring
+    Spark -.->|Streaming Metrics <br>&#40;rows/sec, batchDuration&#41;| EventLog
+    Bronze -.->|Freshness & DLQ Rate| SQLAlert
+
+    %% Pipeline & DQ Observability
+    DLT -.->|Pipeline State & Metrics| EventLog
+    Silver -.->|DQ Constraint Violations| EventLog
+
+    %% Alerting
+    DLQ -.->|DLQ Count > 0| SQLAlert
+    EventLog -.->|Queries on FAILED State| SQLAlert
+    SQLAlert -->|Webhook| Notification
 
     %% Styling
     classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
@@ -96,12 +118,14 @@ flowchart TD
     classDef bad fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
     classDef network fill:#f9f9f9,stroke:#666,stroke-width:2px,color:#000,stroke-dasharray: 5 5;
+    classDef alert fill:#ffe6cc,stroke:#d79b00,stroke-width:1px,color:#000;
     
     class InternalDB,PartnerDB,Bronze,Silver,Gold storage;
-    class SaaSConn,PartnerConn,CDCConn,Kafka,Spark,DLT process;
+    class SaaSConn,PartnerConn,CDCConn,SchemaReg,Kafka,Spark,DLT process;
     class DLQ bad;
-    class EventLog,Alerts monitor;
+    class CC,EventLog,SQLAlert monitor;
     class CustomerVPC,ControlPlane,VPCE,NetworkEgress network;
+    class Notification alert;
 ```
 
 ---
@@ -111,8 +135,17 @@ flowchart TD
 To keep the architecture simple and easy to maintain, we **do not** write custom Kafka Producer code. Instead, we standardize on a centralized **Kafka Connect** cluster to pull data from all internal and external sources in real-time, feeding into Apache Kafka. Databricks **Structured Streaming** then natively consumes these topics.
 
 ### 3.1 Internal VPC Applications (CDC)
-Internal microservices write to an operational database inside the Customer VPC. A **Debezium CDC Source Connector** reads the database transaction logs and streams changes into Kafka over the private AWS backbone. 
-* **Note:** Debezium events have at-least-once delivery semantics. Downstream DLT Silver tables must apply deduplication using `APPLY CHANGES INTO`.
+Internal microservices write to an operational database inside the Customer VPC. A **Debezium CDC Source Connector** reads the database transaction logs and streams changes into Kafka.
+* **Delivery Semantics:** Debezium has at-least-once delivery. Silver DLT tables **must** deduplicate using `APPLY CHANGES INTO` to handle connector restarts.
+
+```sql
+-- DLT Silver: CDC deduplication pattern
+APPLY CHANGES INTO silver.orders
+FROM STREAM(bronze.orders_raw)
+  KEYS (order_id)
+  SEQUENCE BY record_content:ts_ms :: BIGINT
+  STORED AS SCD TYPE 1;
+```
 
 ### 3.2 External Peered VPC Applications
 For databases hosted in a partner's VPC, we establish a **VPC Peering Connection** (or AWS Transit Gateway). A **JDBC Source Connector** securely pulls data across the peering connection into Kafka without traversing the public internet.
@@ -152,42 +185,62 @@ For backwards-compatible schema evolution (e.g., adding a new column), we config
 
 ---
 
-## 6. Data Quality & Observability (DLT Expectations)
+## 6. Observability, Monitoring & Data Quality
 
-Ensuring data quality in a continuous stream requires inline validation. We utilize **DLT Expectations** to define data quality rules directly in the pipeline code.
+Ensuring data quality and pipeline health in a continuous stream requires layered observability across both the Kafka infrastructure and the Databricks pipeline.
 
-### 6.1 The Three Levels of Enforcement
-We apply Python decorators to our DLT Silver tables to enforce contracts:
+### 6.1 Kafka-Side Monitoring (Confluent Control Center)
+The inbound leg (Kafka → Spark) is monitored independently of Databricks using **Confluent Control Center (CC)** or native Kafka JMX metrics:
+*   **Consumer Lag:** Monitors the offset gap between the Kafka producer and the Spark Structured Streaming consumer group. An alert fires if the lag grows continuously over a 5-minute window.
+*   **Throughput Drops:** CC alerts Slack/PagerDuty if the consumer group's commit rate drops to zero during expected traffic windows, indicating a silent failure.
 
-1.  **Retain and Alert (`@expect`):** The data violates a minor rule. The record is loaded, but a data quality metric failure is recorded in the DLT event log.
-    *   *Example:* `@expect("valid_timestamp", "timestamp > '2020-01-01'")`
-2.  **Drop Bad Data (`@expect_or_drop`):** The data is fundamentally flawed and useless. The record is dropped completely from the Silver table.
-    *   *Example:* `@expect_or_drop("valid_user_id", "user_id IS NOT NULL")`
-3.  **Fail the Pipeline (`@expect_or_fail`):** A catastrophic data contract violation has occurred that compromises the entire dataset. The pipeline immediately halts to prevent corruption.
+### 6.2 Databricks-Side Monitoring (DLT Event Log & SQL Alerts)
+Databricks exposes deep pipeline metrics natively via the **DLT Event Log** (System Tables). We use **Databricks SQL Alerts** to trigger Webhooks to Slack/PagerDuty for:
+*   **Pipeline Failures:** Queries the Event Log for `STATE = 'FAILED'`.
+*   **Throughput Metrics:** Monitors `inputRowsPerSecond` vs `processedRowsPerSecond` to detect if the cluster is falling behind.
+*   **Data Staleness (Freshness):** Queries the Bronze table to compare the payload's `event_timestamp` against the `_ingestion_timestamp`. Alerts if staleness exceeds an acceptable threshold (e.g., 2 minutes).
 
-### 6.2 The Quarantine Pattern (DLQ)
+### 6.3 Data Quality Enforcement (DLT Expectations)
+We use SQL-native `CONSTRAINT` clauses in DLT Silver tables to enforce data contracts:
+
+1.  **Retain and Alert (`ON VIOLATION WARN`):** Record loads but violation is logged to the DLT Event Log for alerting.
+    ```sql
+    CONSTRAINT valid_timestamp
+      EXPECT (event_timestamp > '2020-01-01')
+      ON VIOLATION WARN
+    ```
+2.  **Drop Bad Data (`ON VIOLATION DROP ROW`):** Record is dropped from Silver and captured by the Quarantine table.
+    ```sql
+    CONSTRAINT valid_user_id
+      EXPECT (user_id IS NOT NULL)
+      ON VIOLATION DROP ROW
+    ```
+3.  **Fail the Pipeline (`ON VIOLATION FAIL UPDATE`):** Catastrophic contract violation. Pipeline halts immediately to prevent downstream corruption.
+    ```sql
+    CONSTRAINT valid_order_total
+      EXPECT (order_total >= 0)
+      ON VIOLATION FAIL UPDATE
+    ```
+
+### 6.4 The Quarantine Pattern (DLQ)
 Instead of simply dropping bad records, enterprise architectures demand a Dead Letter Queue (DLQ). In DLT, we implement a **Quarantine Pattern**:
 *   A downstream DLT table is explicitly configured to capture the inverse of the Silver expectations. 
 *   All malformed records (e.g., where `user_id IS NULL`) are routed to a `silver_quarantine` Delta table.
-*   Data Engineers query this table to triage application bugs and repair the data.
+*   **DLQ Alerting:** A Databricks SQL Alert continuously monitors the DLQ. If the ratio of quarantined records to total records exceeds 1%, a warning is fired to Slack.
 
-### 6.3 Observability Alerts
-The DLT Event Log captures all pipeline metrics. We configure Databricks SQL Alerts on the `event_log` table to trigger Webhook notifications to Slack/PagerDuty whenever:
-*   A pipeline fails.
-*   The rate of data dropped by `@expect_or_drop` exceeds a specified threshold (e.g., > 5% of the stream is malformed).
-
-### 6.4 Data Quality Requirements per Medallion Layer
+### 6.5 Data Quality Requirements per Medallion Layer
 To maintain trust without creating brittle pipelines, data quality rules must be applied progressively across the layers:
 
 1.  **Bronze Layer (Capture Everything):**
     *   **Requirement:** *Zero data loss.* Do not filter out bad business data here. 
     *   **Rules:** Enforce only structural integrity via the Kafka Schema Registry. Use Structured Streaming schema evolution to ensure unexpected (but valid) columns do not crash the pipeline. All raw events must be captured for auditability and replayability.
+    *   **Monitoring Check:** Lightweight constraints on Bronze (e.g., `_kafka_offset IS NOT NULL`) verify ingestion metadata completeness.
 2.  **Silver Layer (Strict Conformance):**
     *   **Requirement:** *Syntactic correctness and deduplication.*
-    *   **Rules:** Apply strict `@expect_or_drop` rules for Primary Keys (`id IS NOT NULL`) and deduplicate streams using `APPLY CHANGES INTO`. Filter out corrupted records into the DLQ (Quarantine). Data landing in Silver must be clean enough for Data Scientists to trust.
+    *   **Rules:** Apply strict `ON VIOLATION DROP ROW` rules for Primary Keys (`id IS NOT NULL`) and deduplicate streams using `APPLY CHANGES INTO`. Filter out corrupted records into the DLQ (Quarantine). Data landing in Silver must be clean enough for Data Scientists to trust.
 3.  **Gold Layer (Business Logic):**
     *   **Requirement:** *Semantic and business correctness.*
-    *   **Rules:** Apply `@expect` rules to validate business constraints (e.g., `order_total > 0`, `status IN ('Pending', 'Shipped')`). Ensure foreign keys joining to dimension tables are valid. Failures here often indicate logic bugs rather than ingestion errors.
+    *   **Rules:** Apply `ON VIOLATION WARN` rules to validate business constraints (e.g., `order_total > 0`, `status IN ('Pending', 'Shipped')`). Ensure foreign keys joining to dimension tables are valid. Failures here often indicate logic bugs rather than ingestion errors.
 
 ---
 
@@ -197,7 +250,7 @@ To ensure the Real-Time Ingestion Architecture runs efficiently, securely, and c
 
 ### 7.1 Compute & Cost Optimization
 *   **Default to Serverless DLT:** Use Serverless DLT for automatic compute management and rapid scaling. If using Classic DLT, always enable **Enhanced Autoscaling** to handle sudden data spikes without over-provisioning.
-*   **Strategic Execution Modes:** Do not run clusters continuously 24/7 unless sub-minute latency is a strict business requirement. Use `Trigger.AvailableNow` (Scheduled Micro-Batch) for hourly or daily ingestion to significantly reduce costs.
+*   **Always-On Streaming:** Real-time DLT pipelines run in continuous streaming mode. `Trigger.AvailableNow` is a batch pattern and must NOT be used for real-time pipelines — it belongs in batch ingestion architectures.
 *   **Cluster Sizing (Classic DLT):** For streaming workloads, favor compute-optimized instances (e.g., AWS `c5` or Azure `Fsv2` series) over memory-optimized instances, as streaming is typically CPU-bound.
 
 ### 7.2 Storage & State Management
@@ -212,3 +265,37 @@ To ensure the Real-Time Ingestion Architecture runs efficiently, securely, and c
 ### 7.4 CI/CD and Deployment
 *   **Infrastructure as Code:** Deploy DLT pipelines exclusively using **Databricks Asset Bundles (DABs)** or Terraform. Never deploy or modify production pipelines manually via the UI.
 *   **Environment Isolation:** Strictly separate Development, Staging, and Production workspaces. Use the `PREVIEW` DLT channel in Staging to catch runtime bugs before Databricks rolls out updates to your `CURRENT` Production channel.
+
+---
+
+## 8. AWS Networking & Security
+
+Because Databricks compute runs inside the Customer VPC, strict network and identity boundaries must be enforced across all connection points.
+
+### 8.1 Network Isolation (Secure Cluster Connectivity)
+*   **No Public IPs:** Databricks clusters are deployed with **Secure Cluster Connectivity** (SCC) enabled. Cluster nodes have no public IP addresses. All Control Plane communication is routed through a dedicated relay hosted by Databricks.
+*   **AWS PrivateLink:** A PrivateLink endpoint connects the Customer VPC to the Databricks Control Plane. This ensures that DLT job metadata, logs, and event traffic never traverse the public internet.
+
+### 8.2 Kafka Authentication (mTLS / SASL)
+*   Spark Structured Streaming authenticates to the Kafka brokers using **SASL/SCRAM** or **mTLS** (mutual TLS).
+*   Credentials (Kafka bootstrap servers, API keys) are stored in **AWS Secrets Manager** and injected into the DLT pipeline at runtime via Databricks Secret Scopes.
+
+### 8.3 Delta Lake Access (IAM Instance Profiles)
+*   Databricks clusters access Delta Lake tables on S3 using **IAM Instance Profiles** (or Managed Service Identity on Azure). No static access keys are used.
+*   Unity Catalog enforces RBAC by layer:
+    *   `RAW_ROLE`: Bronze tables (Data Engineers only).
+    *   `TRANSFORM_ROLE`: Silver and Gold tables (pipeline authors).
+    *   `BI_READ_ROLE`: Gold tables only (BI tools and analysts).
+
+### 8.4 Debezium Connector Credentials
+*   The Debezium CDC Connector authenticates to the operational database using a dedicated read-only service account with `REPLICATION` privilege only.
+*   Credentials are stored in **AWS Secrets Manager** and referenced by the Kafka Connect worker configuration — never hardcoded.
+
+---
+
+## 9. Downstream Consumers (Gold Layer)
+
+The pipeline does not end at Silver. Analytics Engineering teams build the **Gold Layer** on top of Silver.
+*   **Ownership:** Gold tables are owned by the Analytics Engineering team. Data Engineering owns Bronze and Silver only. This enforces a clean boundary between ingestion and business logic.
+*   **Pattern:** Gold uses DLT **Materialized Views** to compute aggregations (e.g., daily revenue, active users) over Silver Streaming Tables. They refresh automatically when upstream Silver data changes.
+*   **Consumers:** BI tools (Tableau, PowerBI), Databricks SQL dashboards, and ML Feature Stores query exclusively from the Gold layer. Direct access to Bronze or Silver is blocked by Unity Catalog RBAC.

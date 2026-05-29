@@ -87,7 +87,7 @@ flowchart TD
     
     %% Data Pipeline Flow
     Spark --> Bronze
-    Bronze -->|DLT Expectations| Silver
+    Bronze -->|DLT Expectations <br>&#40;ON VIOLATION WARN&#41;| Silver
     Silver --> Gold
 
     %% Networking
@@ -295,4 +295,5 @@ Because Databricks compute runs inside the Customer VPC, strict network and iden
 The pipeline does not end at Silver. Analytics Engineering teams build the **Gold Layer** on top of Silver.
 *   **Ownership:** Gold tables are owned by the Analytics Engineering team. Data Engineering owns Bronze and Silver only. This enforces a clean boundary between ingestion and business logic.
 *   **Pattern:** Gold uses DLT **Materialized Views** to compute aggregations (e.g., daily revenue, active users) over Silver Streaming Tables. They refresh automatically when upstream Silver data changes.
+*   **Business Logic Validation:** We apply SQL `CONSTRAINT ... ON VIOLATION WARN` clauses directly to Gold Materialized Views to validate semantic aggregations (e.g., `total_revenue >= 0`). This ensures dashboards remain online, but any logic bugs are flagged in the DLT Event Log for Analytics Engineers to investigate.
 *   **Consumers:** BI tools (Tableau, PowerBI), Databricks SQL dashboards, and ML Feature Stores query exclusively from the Gold layer. Direct access to Bronze or Silver is blocked by Unity Catalog RBAC.

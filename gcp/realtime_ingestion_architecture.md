@@ -9,13 +9,13 @@ The objective is to establish a unified, serverless streaming pipeline capable o
 To ensure long-term maintainability and enterprise scale, this architecture strictly adheres to the following principles:
 *   **Connector-First Integration:** We prioritize native connectors (Pub/Sub Subscriptions and Datastream) over custom code. This dramatically reduces technical debt and eliminates the need to write custom ingestion applications.
 *   **Shift-Left Data Quality:** We intercept malformed payloads at the ingestion boundary (using Dead Letter Topics) before they can pollute the Data Warehouse, ensuring BigQuery remains pristine.
-*   **Secure by Default:** All data movement is locked down using VPC Service Controls, Customer-Managed Encryption Keys (CMEK), and Private Service Connect, ensuring zero exposure to the public internet.
+*   **Secure by Default:** All data movement is locked down using VPC Service Controls and Customer-Managed Encryption Keys (CMEK), ensuring zero exposure to the public internet.
 
 ---
 
 ## 3. Real-Time Streaming Flow
 
-The following diagram illustrates how continuous data streams flow from upstream sources directly into BigQuery Bronze tables, governed by Dataflow Connectors and strict observability paths.
+The following diagram illustrates how continuous data streams flow from upstream sources directly into BigQuery Bronze tables, via Pub/Sub and Datastream connectors, with strict observability and security controls.
 
 ```mermaid
 flowchart TD
@@ -116,7 +116,7 @@ For internally developed microservices, webhooks, application events, and IoT te
 ### 4.2 Pattern 2: Datastream (Change Data Capture)
 For operational databases (PostgreSQL, MySQL, Oracle, SQL Server), we use **Datastream** to maintain a continuous, real-time replication stream.
 *   **Schema Evolution:** Datastream securely reads the source database's transaction log and automatically handles upstream schema changes (e.g., adding new columns), seamlessly altering the destination BigQuery tables without dropping the stream.
-*   **Error Handling:** Datastream logs replication errors (e.g., unsupported data types) to BigQuery Audit Logs. Cloud Monitoring alerts fire if the error rate exceeds zero.
+*   **Error Handling:** Datastream logs replication errors (e.g., unsupported data types) to **Cloud Logging** (`datastream.googleapis.com`). Cloud Monitoring reads these log-based metrics and fires an alert if the error rate exceeds zero.
 
 ---
 
@@ -152,8 +152,13 @@ We deploy Alert Policies to trigger Webhooks (routing to Slack/PagerDuty) under 
 ## 7. Networking, Security & Governance
 
 ### 7.1 Enterprise Network Isolation
-*   **VPC Service Controls:** BigQuery, Pub/Sub, and Datastream reside within a VPC Service Control perimeter, strictly preventing data exfiltration to unauthorized GCP projects or the public internet.
+*   **VPC Service Controls (VPC SC):** BigQuery, Pub/Sub, and Datastream reside within a strict VPC SC perimeter. This prevents data exfiltration by blocking API requests originating outside the trusted perimeter or targeting unauthorized external projects.
+*   **Private Google Access (PGA):** Internal microservices pushing events to Pub/Sub do so via PGA, ensuring all traffic routes through the Google Cloud internal backbone and never traverses the public internet.
 
-### 7.2 Security & Encryption
-*   **Customer-Managed Encryption Keys (CMEK):** All data at rest in BigQuery Bronze tables and Pub/Sub topics is encrypted using Cloud KMS CMEK, ensuring the enterprise retains full control over cryptographic keys.
-*   **Identity and Access Management (IAM):** Ingestion streams authenticate via dedicated Service Accounts. The principle of least privilege is enforced: Service Accounts are granted the `roles/bigquery.dataEditor` role *only* on the specific Bronze dataset, preventing unauthorized read access.
+### 7.2 Identity & Credential Management
+*   **Workload Identity Federation:** For external SaaS or third-party webhooks pushing to Pub/Sub, we strictly prohibit long-lived Service Account JSON keys. Instead, we use Workload Identity Federation to exchange external tokens (e.g., AWS IAM, GitHub OIDC) for short-lived GCP credentials.
+*   **Secret Manager:** Datastream authenticates to upstream operational databases using credentials stored securely in GCP Secret Manager, preventing hardcoded passwords in configuration files.
+
+### 7.3 Data Security & Encryption
+*   **Customer-Managed Encryption Keys (CMEK):** All data at rest in BigQuery Bronze tables and Pub/Sub topics is encrypted using Cloud KMS CMEK, ensuring the enterprise retains full control over cryptographic keys (including key rotation and immediate revocation).
+*   **Identity and Access Management (IAM):** The principle of least privilege is strictly enforced: Pub/Sub BigQuery subscriptions are granted the `roles/bigquery.dataEditor` role *only* on the specific Bronze dataset, preventing any unauthorized cross-dataset read or write access.

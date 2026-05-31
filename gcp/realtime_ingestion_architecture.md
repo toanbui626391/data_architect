@@ -3,11 +3,11 @@
 ## 1. Executive Summary
 This document outlines the Enterprise **Real-Time Data Ingestion Architecture** designed specifically for **Google Cloud Platform (GCP)** and **BigQuery**. 
 
-The objective is to establish a unified, serverless streaming pipeline capable of ingesting data from multiple sources with sub-second latency. By leveraging GCP-native continuous ingestion services, we eliminate the need for complex, third-party ETL orchestrators or batch staging areas while maintaining strict Data Quality and Observability controls.
+The objective is to establish a unified, serverless streaming pipeline capable of ingesting data from multiple sources with sub-second latency. By leveraging GCP-native continuous ingestion services (specifically **Pub/Sub** and **Datastream**), we eliminate the need for complex, third-party ETL orchestrators or batch staging areas while maintaining strict Data Quality and Observability controls.
 
 ## 2. Design Principles
 To ensure long-term maintainability and enterprise scale, this architecture strictly adheres to the following principles:
-*   **Connector-First Integration:** We prioritize GCP managed connectors (Native Pub/Sub Subscriptions, Dataflow Templates, and Datastream) over custom Python/Java code. This dramatically reduces technical debt and maintenance overhead.
+*   **Connector-First Integration:** We prioritize native connectors (Pub/Sub Subscriptions and Datastream) over custom code. This dramatically reduces technical debt and eliminates the need to write custom ingestion applications.
 *   **Shift-Left Data Quality:** We intercept malformed payloads at the ingestion boundary (using Dead Letter Topics) before they can pollute the Data Warehouse, ensuring BigQuery remains pristine.
 *   **Secure by Default:** All data movement is locked down using VPC Service Controls, Customer-Managed Encryption Keys (CMEK), and Private Service Connect, ensuring zero exposure to the public internet.
 
@@ -21,8 +21,8 @@ The following diagram illustrates how continuous data streams flow from upstream
 flowchart TD
     subgraph Sources [Upstream Data Sources]
         direction TB
+        App[Application Microservices]
         SaaS[SaaS / Webhooks]
-        Kafka[External Kafka]
         DB[(Operational Databases)]
     end
 
@@ -37,7 +37,6 @@ flowchart TD
         subgraph GCP_Connectors [Connector Layer]
             direction TB
             PubSubSub[Pub/Sub BigQuery Subscription <br>&#40;Zero-ETL&#41;]
-            Dataflow[Cloud Dataflow <br>&#40;Kafka / Complex Templates&#41;]
             Datastream[Datastream <br>&#40;CDC - No Pub/Sub needed&#41;]
         end
 
@@ -57,20 +56,17 @@ flowchart TD
     IAMNote[Cloud IAM & CMEK <br>&#40;Governs all resources&#41;]
 
     %% All event sources publish to Pub/Sub first
+    App -->|Native Pub/Sub Client| PubSubTopic
     SaaS -->|HTTP Push / Webhook| PubSubTopic
-    Kafka -->|Serverless VPC Access| PubSubTopic
     DB -->|Transaction Log| Datastream
 
     %% Connectors route messages to Bronze
     PubSubTopic -->|Direct Subscription| PubSubSub
-    PubSubTopic -->|Complex Fan-out| Dataflow
     PubSubSub -->|Continuous Insert| Bronze
-    Dataflow -->|Continuous Insert| Bronze
     Datastream -->|Continuous Replication| Bronze
 
     %% Dead Lettering
     PubSubSub -.->|Schema Mismatch| DLQ
-    Dataflow -.->|Unparseable Record| DLQ
     Datastream -.->|Replication Error| AuditLog
     DLQ -.->|DLQ Count > 0| CloudMonitoring
 
@@ -100,7 +96,7 @@ flowchart TD
     classDef bus fill:#fff2cc,stroke:#d6b656,stroke-width:2px,color:#000;
 
     class Bronze,DB storage;
-    class PubSubSub,Dataflow,Datastream process;
+    class PubSubSub,Datastream process;
     class PubSubTopic bus;
     class DLQ bad;
     class InfoSchema,AuditLog,CloudMonitoring,Dataplex monitor;
@@ -113,32 +109,22 @@ flowchart TD
 ## 4. Serverless Ingestion Patterns (Connector-First)
 
 ### 4.1 Pattern 1: Pub/Sub BigQuery Subscription (Zero-ETL)
-For webhooks, application events, and IoT telemetry published to Cloud Pub/Sub, we use native **BigQuery Subscriptions** — no Dataflow or custom code required.
+For internally developed microservices, webhooks, application events, and IoT telemetry published to Cloud Pub/Sub, we use native **BigQuery Subscriptions** — no custom code required.
 *   **Mechanism:** A Pub/Sub subscription is configured to write directly to a BigQuery Bronze table using the BigQuery Subscription type. Messages are auto-serialized from JSON.
 *   **Dead Lettering:** All subscriptions must configure a **Dead Letter Topic** to capture malformed payloads without blocking the main pipeline.
 
-### 4.2 Pattern 2: Cloud Dataflow Connectors (Managed Templates)
-For complex integrations like third-party Kafka clusters, external message buses, or multi-topic fan-out, we utilize **Cloud Dataflow Streaming Templates**.
-*   **Mechanism:** We deploy Google-provided templates (e.g., `Kafka to BigQuery`) via Serverless VPC Access, avoiding custom Apache Beam code.
-*   **Efficiency:** Dataflow handles stream windowing, backpressure, and network retries automatically at scale.
-
-### 4.3 Pattern 3: Storage Write API (Custom Microservices)
-For internally developed microservices requiring ultra-low latency and massive throughput, applications bypass middleware and write directly using the **BigQuery Storage Write API**.
-*   **Exactly-Once Semantics:** We mandate the use of **Committed Streams**. This pushes exactly-once deduplication to the BigQuery API itself, preventing duplicate records during network retries.
-*   **Network Path:** All Storage Write API traffic from internal apps is routed through **Private Service Connect (PSC)** endpoints, keeping traffic off the public internet.
-
-### 4.4 Pattern 4: Datastream (Change Data Capture)
+### 4.2 Pattern 2: Datastream (Change Data Capture)
 For operational databases (PostgreSQL, MySQL, Oracle, SQL Server), we use **Datastream** to maintain a continuous, real-time replication stream.
 *   **Schema Evolution:** Datastream securely reads the source database's transaction log and automatically handles upstream schema changes (e.g., adding new columns), seamlessly altering the destination BigQuery tables without dropping the stream.
-*   **Error Handling:** Datastream logs replication errors (e.g., unsupported data types) to Cloud Logging. Cloud Monitoring alerts fire if the error rate exceeds zero.
+*   **Error Handling:** Datastream logs replication errors (e.g., unsupported data types) to BigQuery Audit Logs. Cloud Monitoring alerts fire if the error rate exceeds zero.
 
 ---
 
 ## 5. Data Quality Testing & Dead Lettering
 
 ### 5.1 Inline Validation (The Pub/Sub DLQ Pattern)
-When using Dataflow Connectors or Pub/Sub Subscriptions, malformed JSON payloads (e.g., passing a String into an Integer field) will fail insertion.
-*   **Implementation:** We configure all connectors with a **Dead Letter Topic (DLT)** in Pub/Sub.
+When using Pub/Sub Subscriptions, malformed JSON payloads (e.g., passing a String into an Integer field) will fail insertion.
+*   **Implementation:** We configure all subscriptions with a **Dead Letter Topic (DLT)** in Pub/Sub.
 *   **Workflow:** Unparseable messages bypass BigQuery entirely and route immediately to the DLT (e.g., `events-dlq-topic`). This ensures the main pipeline never blocks on poison pills, securing the malformed payload for engineering analysis.
 
 ### 5.2 Post-Ingestion Testing (Dataplex)
@@ -153,8 +139,8 @@ To ensure the logical integrity of the streaming data once it lands, we utilize 
 Telemetry is managed entirely through **Google Cloud's Operations Suite**.
 
 ### 6.1 Connector & Pipeline Telemetry
-*   **Dataflow System Lag:** We closely monitor Dataflow's `System Lag` and `Data Watermark Age`. If lag exceeds 2 minutes, it indicates the connector is struggling to keep up with upstream throughput.
 *   **BigQuery `INFORMATION_SCHEMA`:** Engineers utilize `INFORMATION_SCHEMA.STREAMING_TIMELINE_BY_PROJECT` to monitor streaming buffer sizes and throughput in real-time.
+*   **Pub/Sub Metrics:** We monitor `subscription/oldest_unacked_message_age` to detect if the BigQuery stream is being throttled.
 
 ### 6.2 Cloud Monitoring (Alert Policies)
 We deploy Alert Policies to trigger Webhooks (routing to Slack/PagerDuty) under the following conditions:
@@ -166,9 +152,7 @@ We deploy Alert Policies to trigger Webhooks (routing to Slack/PagerDuty) under 
 ## 7. Networking, Security & Governance
 
 ### 7.1 Enterprise Network Isolation
-*   **VPC Service Controls:** BigQuery, Dataflow, and Datastream reside within a VPC Service Control perimeter, strictly preventing data exfiltration to unauthorized GCP projects or the public internet.
-*   **Serverless VPC Access:** Dataflow Connectors are deployed with Serverless VPC Access connectors, ensuring they can securely reach internal databases or private Kafka clusters without requiring public IP addresses.
-*   **Private Service Connect (PSC):** Internal applications utilizing the Storage Write API connect to BigQuery via PSC endpoints, keeping all data plane traffic on the Google Cloud backbone.
+*   **VPC Service Controls:** BigQuery, Pub/Sub, and Datastream reside within a VPC Service Control perimeter, strictly preventing data exfiltration to unauthorized GCP projects or the public internet.
 
 ### 7.2 Security & Encryption
 *   **Customer-Managed Encryption Keys (CMEK):** All data at rest in BigQuery Bronze tables and Pub/Sub topics is encrypted using Cloud KMS CMEK, ensuring the enterprise retains full control over cryptographic keys.

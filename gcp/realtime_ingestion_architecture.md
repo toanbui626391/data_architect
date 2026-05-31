@@ -21,65 +21,73 @@ The following diagram illustrates how continuous data streams flow from upstream
 flowchart TD
     subgraph Sources [Upstream Data Sources]
         direction TB
-        App[Application Microservices]
-        PubSubSrc[Cloud Pub/Sub Topic <br>&#40;Webhooks / Events&#41;]
+        SaaS[SaaS / Webhooks]
         Kafka[External Kafka]
         DB[(Operational Databases)]
     end
 
     subgraph VPCSC [VPC Service Control Perimeter]
         direction TB
-        
-        subgraph GCP_Ingestion [GCP Real-Time Ingestion Layer]
-            direction TB
-            API[BigQuery Storage Write API <br>&#40;gRPC / PSC&#41;]
-            PubSubSub[Pub/Sub BigQuery Subscription <br>&#40;Zero-ETL&#41;]
-            Dataflow[Cloud Dataflow <br>&#40;Google Connector Templates&#41;]
-            Datastream[Datastream <br>&#40;CDC Service&#41;]
+
+        subgraph MessageBus [Central Message Bus]
+            PubSubTopic[Cloud Pub/Sub Topic <br>&#40;Event Hub&#41;]
             DLQ[(Pub/Sub DLQ <br>&#40;Dead Letter Topic&#41;)]
+        end
+
+        subgraph GCP_Connectors [Connector Layer]
+            direction TB
+            PubSubSub[Pub/Sub BigQuery Subscription <br>&#40;Zero-ETL&#41;]
+            Dataflow[Cloud Dataflow <br>&#40;Kafka / Complex Templates&#41;]
+            Datastream[Datastream <br>&#40;CDC - No Pub/Sub needed&#41;]
         end
 
         subgraph BigQuery [BigQuery Data Warehouse]
             Bronze[(Bronze Tables <br>&#40;CMEK Encrypted&#41;)]
+            InfoSchema[INFORMATION_SCHEMA <br>&#40;Streaming Timeline&#41;]
+            AuditLog[BigQuery Audit Logs]
         end
 
-        subgraph ControlPlane [GCP Observability & Security]
-            CloudLogging[Cloud Logging]
+        subgraph BQObservability [BigQuery Observability & Alerting]
+            Dataplex[Dataplex <br>&#40;Automated DQ Scans&#41;]
             CloudMonitoring[Cloud Monitoring <br>&#40;Alert Policies&#41;]
-            Dataplex[Dataplex <br>&#40;Automated DQ Testing&#41;]
         end
     end
-    
-    Notification[Slack / PagerDuty]
-    IAMNote[Cloud IAM & CMEK <br>&#40;Governs all resources in perimeter&#41;]
 
-    %% Network & Data Flow
-    App -->|PSC Endpoint| API
-    PubSubSrc -->|Direct Subscription| PubSubSub
-    Kafka -->|Serverless VPC Access| Dataflow
+    Notification[Slack / PagerDuty]
+    IAMNote[Cloud IAM & CMEK <br>&#40;Governs all resources&#41;]
+
+    %% All event sources publish to Pub/Sub first
+    SaaS -->|HTTP Push / Webhook| PubSubTopic
+    Kafka -->|Serverless VPC Access| PubSubTopic
     DB -->|Transaction Log| Datastream
 
-    API -->|Direct Stream| Bronze
+    %% Connectors route messages to Bronze
+    PubSubTopic -->|Direct Subscription| PubSubSub
+    PubSubTopic -->|Complex Fan-out| Dataflow
     PubSubSub -->|Continuous Insert| Bronze
     Dataflow -->|Continuous Insert| Bronze
     Datastream -->|Continuous Replication| Bronze
 
-    %% Data Quality & Error Flow
+    %% Dead Lettering
     PubSubSub -.->|Schema Mismatch| DLQ
     Dataflow -.->|Unparseable Record| DLQ
-    Datastream -.->|Replication Error| CloudLogging
+    Datastream -.->|Replication Error| AuditLog
+    DLQ -.->|DLQ Count > 0| CloudMonitoring
 
-    %% Observability & DQ Flow
-    API -.->|Ingestion Metrics| CloudLogging
-    Dataflow -.->|System Lag| CloudMonitoring
-    DLQ -.->|DLQ Message Count > 0| CloudMonitoring
-    CloudLogging -.->|Error Logs| CloudMonitoring
-    
-    Bronze -.->|Scheduled DQ Rules| Dataplex
-    Dataplex -.->|Data Anomaly Alert| CloudMonitoring
+    %% BigQuery-Native Observability
+    Bronze -.->|Streaming Buffer Metrics| InfoSchema
+    Bronze -.->|Insert / Error Events| AuditLog
+    InfoSchema -.->|Throughput Alerts| CloudMonitoring
+    AuditLog -.->|Error Rate Alerts| CloudMonitoring
+
+    %% BigQuery-Native DQ Testing
+    Bronze -.->|Scheduled DQ Scans| Dataplex
+    Dataplex -.->|Anomaly / Rule Violation| CloudMonitoring
+
+    %% Alerting
     CloudMonitoring -->|Webhook| Notification
 
-    %% Governance note
+    %% Governance
     IAMNote -..-> VPCSC
 
     %% Styling
@@ -89,13 +97,14 @@ flowchart TD
     classDef monitor fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
     classDef alert fill:#ffe6cc,stroke:#d79b00,stroke-width:1px,color:#000;
     classDef security fill:#e1d5e7,stroke:#9673a6,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
-    
-    class Bronze storage;
-    class DB storage;
-    class API,PubSubSub,Dataflow,Datastream process;
+    classDef bus fill:#fff2cc,stroke:#d6b656,stroke-width:2px,color:#000;
+
+    class Bronze,DB storage;
+    class PubSubSub,Dataflow,Datastream process;
+    class PubSubTopic bus;
     class DLQ bad;
-    class CloudLogging,CloudMonitoring monitor;
-    class Dataplex,IAMNote security;
+    class InfoSchema,AuditLog,CloudMonitoring,Dataplex monitor;
+    class IAMNote security;
     class Notification alert;
 ```
 

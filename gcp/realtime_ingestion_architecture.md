@@ -23,7 +23,7 @@ flowchart TD
         direction TB
         App[Application Microservices]
         SaaS[SaaS / Webhooks]
-        DB[(Operational Databases)]
+        DB[(Operational DB <br>&#40;PostgreSQL / MySQL / Oracle&#41;)]
     end
 
     subgraph VPCSC [VPC Service Control Perimeter]
@@ -37,7 +37,7 @@ flowchart TD
         subgraph GCP_Connectors [Connector Layer]
             direction TB
             PubSubSub[Pub/Sub BigQuery Subscription <br>&#40;Zero-ETL&#41;]
-            Datastream[Datastream <br>&#40;CDC - No Pub/Sub needed&#41;]
+            Datastream[Datastream <br>&#40;CDC via WAL / binlog&#41;]
         end
 
         subgraph BigQuery [BigQuery Data Warehouse]
@@ -46,45 +46,53 @@ flowchart TD
             AuditLog[BigQuery Audit Logs]
         end
 
-        subgraph BQObservability [BigQuery Observability & Alerting]
-            Dataplex[Dataplex <br>&#40;Automated DQ Scans&#41;]
+        subgraph Observability [Observability, Monitoring & Data Quality]
+            direction TB
+            CloudLog[Cloud Logging <br>&#40;Stream State & Error Logs&#41;]
+            Dataplex[Dataplex DQ <br>&#40;Completeness / Validity / Uniqueness&#41;]
             CloudMonitoring[Cloud Monitoring <br>&#40;Alert Policies&#41;]
         end
     end
 
-    Notification[Slack / PagerDuty]
+    Notification[Slack / PagerDuty <br>&#40;P1: 15 min &#124; P2: 1 hr&#41;]
     IAMNote[Cloud IAM & CMEK <br>&#40;Governs all resources&#41;]
 
-    %% All event sources publish to Pub/Sub first
+    %% Data ingestion paths
     App -->|Native Pub/Sub Client| PubSubTopic
     SaaS -->|HTTP Push / Webhook| PubSubTopic
-    DB -->|Transaction Log| Datastream
+    DB -->|WAL / binlog CDC| Datastream
 
-    %% Connectors route messages to Bronze
+    %% Connector → BigQuery
     PubSubTopic -->|Direct Subscription| PubSubSub
     PubSubSub -->|Continuous Insert| Bronze
-    Datastream -->|Continuous Replication| Bronze
+    Datastream -->|Continuous CDC Merge| Bronze
 
-    %% Dead Lettering
+    %% Dead Lettering — Pub/Sub path
     PubSubSub -.->|Schema Mismatch| DLQ
-    Datastream -.->|Replication Error| AuditLog
-    DLQ -.->|DLQ Count > 0| CloudMonitoring
+    DLQ -.->|P2: DLQ Count > 0| CloudMonitoring
 
-    %% BigQuery-Native Observability
-    Bronze -.->|Streaming Buffer Metrics| InfoSchema
-    Bronze -.->|Insert / Error Events| AuditLog
-    InfoSchema -.->|Throughput Alerts| CloudMonitoring
-    AuditLog -.->|Error Rate Alerts| CloudMonitoring
+    %% Layer 1: Datastream → Cloud Logging
+    Datastream -.->|Stream state & errors <br>&#40;FAILED / unsupportedEvents&#41;| CloudLog
+    CloudLog -.->|Log-based metrics| CloudMonitoring
 
-    %% BigQuery-Native DQ Testing
-    Bronze -.->|Scheduled DQ Scans| Dataplex
-    Dataplex -.->|Anomaly / Rule Violation| CloudMonitoring
+    %% Layer 2: Datastream → Monitoring &#40;time-series metrics&#41;
+    Datastream -.->|P1: replication_latency > 15 min <br>P2: bytes_written drop > 50%| CloudMonitoring
 
-    %% Alerting
-    CloudMonitoring -->|Webhook| Notification
+    %% Layer 3: BigQuery Destination Integrity
+    Bronze -.->|Buffer age metrics| InfoSchema
+    Bronze -.->|Merge events & errors| AuditLog
+    InfoSchema -.->|P3: Buffer age > 5 min| CloudMonitoring
+    AuditLog -.->|P2: Merge error detected| CloudMonitoring
 
-    %% Governance
-    IAMNote -..-> VPCSC
+    %% Layer 4: Dataplex DQ Scans &#40;semantic quality&#41;
+    Bronze -.->|Scheduled scans every 15 min| Dataplex
+    Dataplex -.->|P2: Null PK / Invalid value <br>P3: Row count mismatch| CloudMonitoring
+
+    %% Alerting output
+    CloudMonitoring -->|Webhook with root cause context| Notification
+
+    %% Governance overlay
+    IAMNote -.-> VPCSC
 
     %% Styling
     classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
@@ -99,7 +107,7 @@ flowchart TD
     class PubSubSub,Datastream process;
     class PubSubTopic bus;
     class DLQ bad;
-    class InfoSchema,AuditLog,CloudMonitoring,Dataplex monitor;
+    class CloudLog,InfoSchema,AuditLog,CloudMonitoring,Dataplex monitor;
     class IAMNote security;
     class Notification alert;
 ```
@@ -162,3 +170,6 @@ We deploy Alert Policies to trigger Webhooks (routing to Slack/PagerDuty) under 
 ### 7.3 Data Security & Encryption
 *   **Customer-Managed Encryption Keys (CMEK):** All data at rest in BigQuery Bronze tables and Pub/Sub topics is encrypted using Cloud KMS CMEK, ensuring the enterprise retains full control over cryptographic keys (including key rotation and immediate revocation).
 *   **Identity and Access Management (IAM):** The principle of least privilege is strictly enforced: Pub/Sub BigQuery subscriptions are granted the `roles/bigquery.dataEditor` role *only* on the specific Bronze dataset, preventing any unauthorized cross-dataset read or write access.
+
+
+

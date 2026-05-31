@@ -22,7 +22,8 @@ flowchart TD
     subgraph Sources [Upstream Data Sources]
         direction TB
         App[Application Microservices]
-        Kafka[External Kafka / PubSub]
+        PubSubSrc[Cloud Pub/Sub Topic <br>&#40;Webhooks / Events&#41;]
+        Kafka[External Kafka]
         DB[(Operational Databases)]
     end
 
@@ -31,8 +32,9 @@ flowchart TD
         
         subgraph GCP_Ingestion [GCP Real-Time Ingestion Layer]
             direction TB
-            API[BigQuery Storage Write API <br>&#40;gRPC Stream&#41;]
-            Dataflow[Cloud Dataflow <br>&#40;Google Connectors&#41;]
+            API[BigQuery Storage Write API <br>&#40;gRPC / PSC&#41;]
+            PubSubSub[Pub/Sub BigQuery Subscription <br>&#40;Zero-ETL&#41;]
+            Dataflow[Cloud Dataflow <br>&#40;Google Connector Templates&#41;]
             Datastream[Datastream <br>&#40;CDC Service&#41;]
             DLQ[(Pub/Sub DLQ <br>&#40;Dead Letter Topic&#41;)]
         end
@@ -45,23 +47,27 @@ flowchart TD
             CloudLogging[Cloud Logging]
             CloudMonitoring[Cloud Monitoring <br>&#40;Alert Policies&#41;]
             Dataplex[Dataplex <br>&#40;Automated DQ Testing&#41;]
-            IAM[Cloud IAM <br>&#40;Least Privilege&#41;]
         end
     end
     
     Notification[Slack / PagerDuty]
+    IAMNote[Cloud IAM & CMEK <br>&#40;Governs all resources in perimeter&#41;]
 
     %% Network & Data Flow
     App -->|PSC Endpoint| API
+    PubSubSrc -->|Direct Subscription| PubSubSub
     Kafka -->|Serverless VPC Access| Dataflow
     DB -->|Transaction Log| Datastream
 
     API -->|Direct Stream| Bronze
+    PubSubSub -->|Continuous Insert| Bronze
     Dataflow -->|Continuous Insert| Bronze
     Datastream -->|Continuous Replication| Bronze
 
-    %% Data Quality Flow
-    Dataflow -.->|Schema Mismatch / Unparseable| DLQ
+    %% Data Quality & Error Flow
+    PubSubSub -.->|Schema Mismatch| DLQ
+    Dataflow -.->|Unparseable Record| DLQ
+    Datastream -.->|Replication Error| CloudLogging
 
     %% Observability & DQ Flow
     API -.->|Ingestion Metrics| CloudLogging
@@ -71,11 +77,10 @@ flowchart TD
     
     Bronze -.->|Scheduled DQ Rules| Dataplex
     Dataplex -.->|Data Anomaly Alert| CloudMonitoring
-    
-    %% Security Flow
-    IAM -.->|AuthZ| GCP_Ingestion
-    
     CloudMonitoring -->|Webhook| Notification
+
+    %% Governance note
+    IAMNote -..-> VPCSC
 
     %% Styling
     classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
@@ -87,10 +92,10 @@ flowchart TD
     
     class Bronze storage;
     class DB storage;
-    class API,Dataflow,Datastream process;
+    class API,PubSubSub,Dataflow,Datastream process;
     class DLQ bad;
     class CloudLogging,CloudMonitoring monitor;
-    class Dataplex,IAM security;
+    class Dataplex,IAMNote security;
     class Notification alert;
 ```
 
@@ -98,18 +103,25 @@ flowchart TD
 
 ## 4. Serverless Ingestion Patterns (Connector-First)
 
-### 4.1 Pattern 1: Cloud Dataflow Connectors (Managed Templates)
-For complex integrations like third-party Kafka clusters, external message buses, or IoT telemetry, we utilize **Cloud Dataflow Streaming Templates**.
-*   **Mechanism:** Instead of writing custom Apache Beam code, we deploy Google-provided templates (e.g., `Pub/Sub to BigQuery` or `Kafka to BigQuery`). 
-*   **Efficiency:** Dataflow acts as an infinitely scalable, serverless connector engine that handles stream windowing, backpressure, and network retries automatically.
+### 4.1 Pattern 1: Pub/Sub BigQuery Subscription (Zero-ETL)
+For webhooks, application events, and IoT telemetry published to Cloud Pub/Sub, we use native **BigQuery Subscriptions** — no Dataflow or custom code required.
+*   **Mechanism:** A Pub/Sub subscription is configured to write directly to a BigQuery Bronze table using the BigQuery Subscription type. Messages are auto-serialized from JSON.
+*   **Dead Lettering:** All subscriptions must configure a **Dead Letter Topic** to capture malformed payloads without blocking the main pipeline.
 
-### 4.2 Pattern 2: Storage Write API (Custom Microservices)
+### 4.2 Pattern 2: Cloud Dataflow Connectors (Managed Templates)
+For complex integrations like third-party Kafka clusters, external message buses, or multi-topic fan-out, we utilize **Cloud Dataflow Streaming Templates**.
+*   **Mechanism:** We deploy Google-provided templates (e.g., `Kafka to BigQuery`) via Serverless VPC Access, avoiding custom Apache Beam code.
+*   **Efficiency:** Dataflow handles stream windowing, backpressure, and network retries automatically at scale.
+
+### 4.3 Pattern 3: Storage Write API (Custom Microservices)
 For internally developed microservices requiring ultra-low latency and massive throughput, applications bypass middleware and write directly using the **BigQuery Storage Write API**.
 *   **Exactly-Once Semantics:** We mandate the use of **Committed Streams**. This pushes exactly-once deduplication to the BigQuery API itself, preventing duplicate records during network retries.
+*   **Network Path:** All Storage Write API traffic from internal apps is routed through **Private Service Connect (PSC)** endpoints, keeping traffic off the public internet.
 
-### 4.3 Pattern 3: Datastream (Change Data Capture)
+### 4.4 Pattern 4: Datastream (Change Data Capture)
 For operational databases (PostgreSQL, MySQL, Oracle, SQL Server), we use **Datastream** to maintain a continuous, real-time replication stream.
 *   **Schema Evolution:** Datastream securely reads the source database's transaction log and automatically handles upstream schema changes (e.g., adding new columns), seamlessly altering the destination BigQuery tables without dropping the stream.
+*   **Error Handling:** Datastream logs replication errors (e.g., unsupported data types) to Cloud Logging. Cloud Monitoring alerts fire if the error rate exceeds zero.
 
 ---
 

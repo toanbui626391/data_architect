@@ -22,7 +22,7 @@ flowchart TD
     subgraph Sources [Upstream Data Sources]
         direction TB
         App[Application Microservices]
-        SaaS[SaaS / Webhooks]
+        SaaS[SaaS / CRM / Webhooks]
         DB[(Operational DB <br>&#40;PostgreSQL / MySQL / Oracle&#41;)]
     end
 
@@ -36,6 +36,7 @@ flowchart TD
 
         subgraph GCP_Connectors [Connector Layer]
             direction TB
+            IntConnectors[Integration Connectors <br>&#40;SaaS / App Ingress&#41;]
             PubSubSub[Pub/Sub BigQuery Subscription <br>&#40;Zero-ETL&#41;]
             Datastream[Datastream <br>&#40;CDC via WAL / binlog&#41;]
         end
@@ -59,7 +60,8 @@ flowchart TD
 
     %% Data ingestion paths
     App -->|Native Pub/Sub Client| PubSubTopic
-    SaaS -->|HTTP Push / Webhook| PubSubTopic
+    SaaS -->|Enterprise Event| IntConnectors
+    IntConnectors -->|Config-Based Ingress| PubSubTopic
     DB -->|WAL / binlog CDC| Datastream
 
     %% Connector → BigQuery
@@ -104,7 +106,7 @@ flowchart TD
     classDef bus fill:#fff2cc,stroke:#d6b656,stroke-width:2px,color:#000;
 
     class Bronze,DB storage;
-    class PubSubSub,Datastream process;
+    class PubSubSub,Datastream,IntConnectors process;
     class PubSubTopic bus;
     class DLQ bad;
     class CloudLog,InfoSchema,AuditLog,CloudMonitoring,Dataplex monitor;
@@ -125,6 +127,11 @@ For internally developed microservices, webhooks, application events, and IoT te
 For operational databases (PostgreSQL, MySQL, Oracle, SQL Server), we use **Datastream** to maintain a continuous, real-time replication stream.
 *   **Schema Evolution:** Datastream securely reads the source database's transaction log and automatically handles upstream schema changes (e.g., adding new columns), seamlessly altering the destination BigQuery tables without dropping the stream.
 *   **Error Handling:** Datastream logs replication errors (e.g., unsupported data types) to **Cloud Logging** (`datastream.googleapis.com`). Cloud Monitoring reads these log-based metrics and fires an alert if the error rate exceeds zero.
+
+### 4.3 Pattern 3: Integration Connectors (Config-Based Source Ingress)
+For enterprise applications (SaaS, Salesforce, SAP) and third-party webhooks, we use **GCP Integration Connectors** to establish secure, zero-code ingress into Cloud Pub/Sub.
+*   **Mechanism:** The Integration Connector connects to the source platform using enterprise connection profiles and automatically publishes event payloads directly to the central Pub/Sub Topic upon specific trigger conditions.
+*   **Benefits:** Completely serverless, config-driven, and managed natively in the GCP Console, eliminating the need to host custom webhook listener APIs.
 
 ---
 

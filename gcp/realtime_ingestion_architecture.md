@@ -146,11 +146,13 @@ flowchart TD
 For internally developed microservices, webhooks, application events, and IoT telemetry published to Cloud Pub/Sub, we use native **BigQuery Subscriptions** — no custom code required.
 *   **Mechanism:** A Pub/Sub subscription is configured to write directly to a BigQuery Bronze table using the BigQuery Subscription type. Messages are auto-serialized from JSON.
 *   **Dead Lettering:** All subscriptions must configure a **Dead Letter Topic** to capture malformed payloads without blocking the main pipeline.
+*   **Schema Registry & Compatibility:** When using the **Pub/Sub Schema Registry** to validate payloads, the registry must be configured with `BACKWARD` or `FULL` schema compatibility. This guarantees that upstream microservices deploying new schemas do not introduce backward-incompatible formats that could crash publishers or break downstream ingestion subscriptions.
 
 ### 4.2 Pattern 2: Datastream (Change Data Capture)
 For operational databases (PostgreSQL, MySQL, Oracle, SQL Server), we use **Datastream** to maintain a continuous, real-time replication stream.
 *   **Schema Evolution:** Datastream securely reads the source database's transaction log and automatically handles upstream schema changes (e.g., adding new columns), seamlessly altering the destination BigQuery tables without dropping the stream.
 *   **Error Handling:** Datastream logs replication errors (e.g., unsupported data types) to **Cloud Logging** (`datastream.googleapis.com`). Cloud Monitoring reads these log-based metrics and fires an alert if the error rate exceeds zero.
+*   **Secure Staging Bucket:** Datastream writes Change Data Capture (CDC) files into an intermediate Cloud Storage (GCS) staging bucket before BigQuery ingests them. This staging bucket must reside inside the same VPC Service Control perimeter, be protected with Cloud KMS CMEK, and utilize a 7-day GCS Lifecycle Policy to automatically purge processed CDC staging files, eliminating unnecessary storage costs.
 
 ### 4.3 Pattern 3: Integration Connectors (Config-Based Source Ingress)
 For enterprise applications (SaaS, Salesforce, SAP) and third-party webhooks, we use **GCP Integration Connectors** to establish secure, zero-code ingress into Cloud Pub/Sub.
@@ -185,6 +187,7 @@ Telemetry is managed entirely through **Google Cloud's Operations Suite**.
 We deploy Alert Policies to trigger Webhooks (routing to Slack/PagerDuty) under the following conditions:
 1.  **DLQ Spike Alert:** Triggers if the `PubSubDLQ` message count `> 0`. This indicates an upstream system is actively violating the data contract.
 2.  **Datastream Replication Lag:** Monitors the CDC stream and alerts if the total replication latency from source to BigQuery exceeds an acceptable SLA.
+3.  **BigQuery Streaming Quota Exceeded Alert:** Monitors the metric `serviceruntime.googleapis.com/quota/exceeded` targeting the BigQuery API. This fires a **P2 Alert** if write throughput or quota allocation limits are exceeded, warning operations before Pub/Sub backlogs grow.
 
 ---
 

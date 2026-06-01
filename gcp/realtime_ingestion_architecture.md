@@ -10,6 +10,10 @@ To ensure long-term maintainability and enterprise scale, this architecture stri
 *   **Connector-First Integration:** We prioritize native connectors (Pub/Sub Subscriptions and Datastream) over custom code. This dramatically reduces technical debt and eliminates the need to write custom ingestion applications.
 *   **Shift-Left Data Quality:** We intercept malformed payloads at the ingestion boundary (using Dead Letter Topics) before they can pollute the Data Warehouse, ensuring BigQuery remains pristine.
 *   **Secure by Default:** All data movement is locked down using VPC Service Controls and Customer-Managed Encryption Keys (CMEK), ensuring zero exposure to the public internet.
+*   **Recovery & Resilience:** The pipeline must tolerate failures at every stage without data loss or requiring manual intervention. Three mechanisms enforce this:
+    *   **Dead Letter Replay:** All Pub/Sub Dead Letter Topics (DLTs) retain failed messages for a minimum of **7 days**. After engineering analysis and schema or logic correction, messages are replayed into the main topic using the Pub/Sub `seek` API — no data is permanently discarded.
+    *   **Datastream Stream Resumption:** If a Datastream stream enters a `FAILED` state (e.g., due to a network partition or source DB restart), it automatically resumes from the last committed WAL/binlog position on reconnection. No data gaps occur, as the Change Data Capture offset is durably checkpointed by Datastream.
+    *   **DQ-Gated Recovery:** After any recovery event (DLT replay or Datastream restart), the affected Bronze table must pass a **Dataplex DQ scan** before downstream transformation pipelines (Dataform Silver runs) are re-enabled, preventing corrupted or out-of-order records from propagating into the Silver and Gold layers.
 
 ---
 
@@ -32,6 +36,7 @@ flowchart TD
         subgraph MessageBus [Central Message Bus]
             PubSubTopic[Cloud Pub/Sub Topic <br>&#40;Event Hub&#41;]
             DLQ[(Pub/Sub DLQ <br>&#40;Dead Letter Topic&#41;)]
+            SchemaRegistry[Pub/Sub Schema Registry <br>&#40;Avro / Protobuf Contract&#41;]
         end
 
         subgraph GCP_Connectors [Connector Layer]
@@ -43,20 +48,25 @@ flowchart TD
 
         subgraph BigQuery [BigQuery Data Warehouse]
             Bronze[(Bronze Tables <br>&#40;CMEK Encrypted&#41;)]
+            BronzeDL[(Bronze Dead-Letter Table <br>&#40;Unrecoverable Records&#41;)]
             InfoSchema[INFORMATION_SCHEMA <br>&#40;Streaming Timeline&#41;]
             AuditLog[BigQuery Audit Logs]
         end
 
-        subgraph Observability [Observability, Monitoring & Data Quality]
+        subgraph DLQHandling [Malformed Message Handling]
+            DLQProcessor[DLQ Processor <br>&#40;Cloud Functions&#41;]
+        end
+
+        subgraph Observability [Observability, Monitoring &#38; Data Quality]
             direction TB
-            CloudLog[Cloud Logging <br>&#40;Stream State & Error Logs&#41;]
+            CloudLog[Cloud Logging <br>&#40;Stream State &#38; Error Logs&#41;]
             Dataplex[Dataplex DQ <br>&#40;Completeness / Validity / Uniqueness&#41;]
             CloudMonitoring[Cloud Monitoring <br>&#40;Alert Policies&#41;]
         end
     end
 
     Notification[Slack / PagerDuty <br>&#40;P1: 15 min &#124; P2: 1 hr&#41;]
-    IAMNote[Cloud IAM & CMEK <br>&#40;Governs all resources&#41;]
+    IAMNote[Cloud IAM &#38; CMEK <br>&#40;Governs all resources&#41;]
 
     %% Data ingestion paths
     App -->|Native Pub/Sub Client| PubSubTopic
@@ -64,17 +74,31 @@ flowchart TD
     IntConnectors -->|Config-Based Ingress| PubSubTopic
     DB -->|WAL / binlog CDC| Datastream
 
+    %% Schema enforcement — Pub/Sub path
+    SchemaRegistry -.->|Validates on publish| PubSubTopic
+    SchemaRegistry -.->|P1: Schema violation rejected| CloudMonitoring
+
+    %% Schema Change — Datastream path
+    DB -.->|DDL change detected in WAL| Datastream
+    Datastream -->|Auto ALTER TABLE <br>&#40;additive DDL propagation&#41;| Bronze
+    Datastream -.->|P2: Unsupported DDL <br>&#40;DROP / RENAME column&#41;| CloudLog
+
     %% Connector → BigQuery
     PubSubTopic -->|Direct Subscription| PubSubSub
     PubSubSub -->|Continuous Insert| Bronze
     Datastream -->|Continuous CDC Merge| Bronze
 
     %% Dead Lettering — Pub/Sub path
-    PubSubSub -.->|Schema Mismatch| DLQ
-    DLQ -.->|P2: DLQ Count > 0| CloudMonitoring
+    PubSubSub -.->|Malformed / Schema Mismatch| DLQ
+    DLQ -->|Trigger on message| DLQProcessor
+
+    %% DLQ Processor routing
+    DLQProcessor -->|Fixed: Replay via seek API| PubSubTopic
+    DLQProcessor -.->|Unrecoverable: Park| BronzeDL
+    DLQProcessor -.->|P2: DLQ Count > 0| CloudMonitoring
 
     %% Layer 1: Datastream → Cloud Logging
-    Datastream -.->|Stream state & errors <br>&#40;FAILED / unsupportedEvents&#41;| CloudLog
+    Datastream -.->|Stream state &#38; errors <br>&#40;FAILED / unsupportedEvents&#41;| CloudLog
     CloudLog -.->|Log-based metrics| CloudMonitoring
 
     %% Layer 2: Datastream → Monitoring &#40;time-series metrics&#41;
@@ -106,9 +130,9 @@ flowchart TD
     classDef bus fill:#fff2cc,stroke:#d6b656,stroke-width:2px,color:#000;
 
     class Bronze,DB storage;
-    class PubSubSub,Datastream,IntConnectors process;
-    class PubSubTopic bus;
-    class DLQ bad;
+    class PubSubSub,Datastream,IntConnectors,DLQProcessor process;
+    class PubSubTopic,SchemaRegistry bus;
+    class DLQ,BronzeDL bad;
     class CloudLog,InfoSchema,AuditLog,CloudMonitoring,Dataplex monitor;
     class IAMNote security;
     class Notification alert;

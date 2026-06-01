@@ -205,5 +205,58 @@ We deploy Alert Policies to trigger Webhooks (routing to Slack/PagerDuty) under 
 *   **Customer-Managed Encryption Keys (CMEK):** All data at rest in BigQuery Bronze tables and Pub/Sub topics is encrypted using Cloud KMS CMEK, ensuring the enterprise retains full control over cryptographic keys (including key rotation and immediate revocation).
 *   **Identity and Access Management (IAM):** The principle of least privilege is strictly enforced: Pub/Sub BigQuery subscriptions are granted the `roles/bigquery.dataEditor` role *only* on the specific Bronze dataset, preventing any unauthorized cross-dataset read or write access.
 
+---
+
+## 8. Cost Analysis & Financial Governance
+
+To guarantee fiscal predictability, we analyze the architectural cost drivers across ingress, messaging, staging, and warehousing.
+
+### 8.1 Ingestion Cost Allocation Structure
+
+| Architectural Layer | Native GCP Service | Primary Cost Driver | Financial Characteristic |
+| :--- | :--- | :--- | :--- |
+| **SaaS Ingress** | Integration Connectors | Connection hours + payload transfer volume. | Fixed hourly cost per active connection profile + variable usage fees ($/GB processed). |
+| **Database CDC** | Datastream | Volume of CDC change logs processed from the source DB. | **Usage Model:** Scaled strictly on data throughput. Billed at **$2.00 per GB** for MySQL/Postgres and **$2.50 per GB** for Oracle. |
+| **Message Bus** | Cloud Pub/Sub | Throughput volume (ingress and egress). | **Highly Variable:** Billed at **$0.06 per GB** processed. First 10 GB per month is free. |
+| **Intermediate Staging** | Cloud Storage (GCS) | Staged CDC Avro files at rest. | **Active Storage:** Billed at **$0.020 per GB/month**. Temporary staging only; minimized via lifecycle policies. |
+| **Warehouse Land** | BigQuery Ingestion | Storage Write API (Streaming inserts). | Billed at **$0.025 per GB** ingested. First 2 GB per month is free. |
+| **Storage Layer** | BigQuery Storage | Data footprint at rest in the Bronze layer. | **Active Storage:** $0.020/GB/month.<br>**Long-Term Storage (90+ days untouched):** $0.010/GB/month. |
+
+### 8.2 Operational Financial Governance
+*   **Decoupled Ingestion Telemetry Costs:** Cloud Logging and Cloud Monitoring alerts are tuned to record telemetry selectively (filtering verbose stream connections), capping monitoring overhead at < 1.5% of the total ingestion budget.
+*   **Compute-Free Streaming:** By utilizing Pub/Sub BigQuery Subscriptions and Datastream CDC, we avoid continuous, idle compute charges associated with custom Cloud Run/Dataflow streaming setups, making the default pricing structural, predictable, and proportional to business activity.
+
+---
+
+## 9. Cost Optimization Strategies
+
+We enforce five native, structural cost optimization strategies across the real-time ingestion pipelines:
+
+### 9.1 Leverage BigQuery Storage Write API (Default Stream)
+All application events and microservices ingesting via Pub/Sub must use the modern **BigQuery Storage Write API** instead of legacy BigQuery Streaming Inserts.
+*   **Implementation:** Ensure the Pub/Sub BigQuery Subscription is configured to write using the Storage Write API's default stream rather than legacy JSON inserts.
+*   **Impact:** Cuts ingestion compute costs from **$0.05/GB** (legacy) down to **$0.025/GB**, yielding an immediate **50% direct savings** on streaming data land.
+
+### 9.2 Aggressive Bronze Table Partition Expiration (TTL)
+Bronze tables mirror raw landing states and act strictly as staging layers. Historical query execution must target the highly compressed Silver and Gold layers.
+*   **Implementation:** Enforce a strict **partition expiration policy of 90 days** on all raw Bronze tables. 
+*   **Impact:** Old partition files automatically expire and are purged by BigQuery, keeping storage costs flat while preserving long-term analytical states exclusively in optimized downstream layers.
+
+### 9.3 Source Schema & Table Filtering in Datastream
+Datastream CDC charges are proportional to transaction volume. Replicating unnecessary tables or high-frequency log structures drives runaway billing.
+*   **Implementation:** Define strict source **table and schema exclusion filters** inside the Datastream Connection Profile. Exclude temporary tables, application session tables, and audit logs at the source WAL/binlog parser level.
+*   **Impact:** Eliminates the ingestion of non-analytical transaction data, lowering Datastream processing charges by up to **40%** in transactional workloads.
+
+### 9.4 Pub/Sub Message Retention Tuning
+Maintaining data in Pub/Sub topics for extended durations incurs storage charges, which can build up significantly for high-volume streams.
+*   **Implementation:** Reduce Pub/Sub topic message retention from the default 7 days to **3 days** (72 hours). Our recovery principles (Section 2) ensure that any failures are triaged within a 15-minute rolling window, making a 3-day buffer more than sufficient for pipeline failures.
+*   **Impact:** Reduces active message storage fees in Pub/Sub by **57%** during persistent peak transaction events.
+
+### 9.5 Automatic Purging of Datastream GCS Staging Buckets
+Datastream uses GCS staging buckets to land raw CDC Avro files before loading them into BigQuery. Leaving these files indefinitely creates silent GCS storage billing.
+*   **Implementation:** Deploy a GCS **Lifecycle Management Rule** on all Datastream staging buckets to **automatically delete files after 7 days**.
+*   **Impact:** Keeps GCS staging storage at absolute zero over a rolling 7-day window, preventing secondary storage accumulation.
+
+
 
 

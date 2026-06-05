@@ -16,25 +16,32 @@ The following diagram illustrates how MSK Connect handles both database CDC and 
 flowchart TD
     %% Sources
     subgraph InternalEnv [On-Premises / Internal VPC]
-        SAPHana[("SAP HANA Database")]
+        SAPHana[("SAP HANA Database <br>&#40;Pull/JDBC&#41;")]
+        SAPEventMesh["SAP Event Mesh <br>&#40;Push/Webhook&#41;"]
     end
 
     subgraph SaaSEnv [Public SaaS]
-        Salesforce["Salesforce Cloud <br>&#40;Pub/Sub API&#41;"]
+        Salesforce["Salesforce Cloud <br>&#40;Pull/PubSub API&#41;"]
+        SFDCOutbound["Salesforce Outbound <br>&#40;Push/Webhook&#41;"]
     end
 
     %% Customer VPC
     subgraph CustomerVPC [AWS Customer VPC &#40;Data Plane&#41;]
         direction TB
         
+        subgraph EdgeTier [AWS Edge]
+            WAF["AWS WAF <br>&#40;Firewall&#41;"]
+        end
+        
         subgraph Networking [Networking Routes]
-            TGW["AWS Transit Gateway <br>&#40;Inbound Internal&#41;"]
+            TGW["AWS Transit Gateway <br>&#40;Internal Routing&#41;"]
             NATGW["NAT Gateway <br>&#40;Outbound External&#41;"]
         end
 
-        subgraph IngestionTier [Unified Compute Tier]
-            MSKConnect["Amazon MSK Connect <br>&#40;Serverless Workers&#41;"]
-            Secrets["AWS Secrets Manager <br>&#40;SAP & SFDC Credentials&#41;"]
+        subgraph IngestionTier [Unified Compute & API Tier]
+            MSKConnect["Amazon MSK Connect <br>&#40;Pull/Subscribe Workers&#41;"]
+            APIGateway["Amazon API Gateway <br>&#40;Push/Webhook Receiver&#41;"]
+            Secrets["AWS Secrets Manager <br>&#40;Credentials&#41;"]
         end
 
         subgraph MessageBus [Centralized Message Bus]
@@ -57,11 +64,10 @@ flowchart TD
     %% Notification Target
     Notification["Slack / PagerDuty"]
 
-    %% Data Flow (SAP)
+    %% Data Flow (Pull Approach via MSK Connect)
     SAPHana -.->|TCP via Private Routing| TGW
-    TGW -.->|JDBC / CDC Stream| MSKConnect
+    TGW -.->|JDBC Stream| MSKConnect
     
-    %% Data Flow (Salesforce)
     MSKConnect -.->|HTTPS Auth Request| NATGW
     NATGW -.-> Salesforce
     Salesforce -.->|Streams CDC Events| NATGW
@@ -69,14 +75,23 @@ flowchart TD
 
     Secrets -.->|Injects Credentials| MSKConnect
     
+    %% Data Flow (Push Approach via API Gateway)
+    SAPEventMesh -.->|HTTPS POST| WAF
+    SFDCOutbound -.->|HTTPS POST| WAF
+    WAF --> APIGateway
+    
+    %% Aggregation into Message Bus
     MSKConnect --> GlueRegistry
-    GlueRegistry -->|Validated Avro Payload| MSK
+    GlueRegistry -->|Validated Avro| MSK
     GlueRegistry -.->|Validation Error| DLQ
     
+    APIGateway -->|AWS Service Proxy Integration| MSK
+
     MSK --> Databricks
 
     %% Monitoring Flow
     MSKConnect -.->|Task FAILED| CloudWatch
+    APIGateway -.->|4XX/5XX Errors| CloudWatch
     MSK -.->|Broker Health / Consumer Lag| CloudWatch
     DLQ -.->|Message Count > 0| CloudWatch
     
@@ -89,10 +104,12 @@ flowchart TD
     classDef bad fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
     classDef network fill:#f9f9f9,stroke:#666,stroke-width:2px,color:#000,stroke-dasharray: 5 5;
+    classDef edge fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     classDef alert fill:#ffe6cc,stroke:#d79b00,stroke-width:1px,color:#000;
     
     class SAPHana,MSK,DLQ storage;
-    class Salesforce,MSKConnect,GlueRegistry,Databricks,Secrets process;
+    class Salesforce,MSKConnect,APIGateway,GlueRegistry,Databricks,Secrets process;
+    class WAF edge;
     class DLQ bad;
     class CloudWatch,Lambda monitor;
     class CustomerVPC,InternalEnv,SaaSEnv,Networking,ControlPlane network;
@@ -152,57 +169,11 @@ In enterprise scenarios where direct inbound access to a source system (like a t
 
 For these strict environments, we deploy a **Push-Based (Webhook)** architecture. The data owners are responsible for pushing events outwards, and we provide a highly secure "front door" to receive them and drop them directly onto the MSK bus.
 
-### 6.1 Push-Based Architecture Diagram
+### 6.1 Unified Front Door Logic
 
-```mermaid
-flowchart TD
-    %% Third Party Sources
-    subgraph ThirdPartyEnv [External / Third-Party Managed]
-        SAPEventMesh["SAP Event Mesh / ABAP Trigger"]
-        SFDCOutbound["Salesforce Outbound Messages"]
-    end
-
-    %% AWS API Tier
-    subgraph APITier [AWS Edge & API Layer]
-        WAF["AWS WAF <br>&#40;Web Application Firewall&#41;"]
-        APIGateway["Amazon API Gateway <br>&#40;REST Endpoint&#41;"]
-    end
-
-    %% Customer VPC
-    subgraph CustomerVPC [AWS Customer VPC]
-        direction TB
-        subgraph MessageBus [Centralized Message Bus]
-            MSK["Amazon MSK <br>&#40;Apache Kafka Brokers&#41;"]
-        end
-    end
-
-    %% Control Plane
-    subgraph ControlPlane [AWS Control Plane]
-        CloudWatch["Amazon CloudWatch"]
-    end
-
-    %% Data Flow
-    SAPEventMesh -.->|HTTPS POST| WAF
-    SFDCOutbound -.->|HTTPS POST| WAF
-    WAF --> APIGateway
-    
-    %% API Gateway Service Proxy to MSK
-    APIGateway -->|AWS Service Proxy Integration| MSK
-
-    %% Monitoring
-    APIGateway -.->|4XX / 5XX Errors| CloudWatch
-    
-    %% Styling
-    classDef edge fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
-    classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
-    classDef process fill:#dae8fc,stroke:#6c8ebf,stroke-width:1px,color:#000;
-    classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
-    
-    class WAF,APIGateway edge;
-    class MSK storage;
-    class SAPEventMesh,SFDCOutbound process;
-    class CloudWatch monitor;
-```
+As shown in the main architecture diagram, the architecture supports both methods simultaneously to reach the Central Message Bus:
+*   **Pull/Subscribe:** Using MSK Connect.
+*   **Push/Webhook:** Using API Gateway.
 
 ### 6.2 Edge Schema Enforcement
 When using MSK Connect, we rely on the AWS Glue Schema Registry for data quality. In the Push-Based pattern, we push schema validation to the very edge using **Amazon API Gateway Request Validators**.

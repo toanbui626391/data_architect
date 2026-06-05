@@ -101,3 +101,81 @@ resource "aws_iam_role_policy" "msk_connect_policy" {
     ]
   })
 }
+
+# ------------------------------------------------------------------------------
+# IAM ROLES (API Gateway & EventBridge Pipes)
+# ------------------------------------------------------------------------------
+resource "aws_iam_role" "apigw_sqs_role" {
+  name = "apigw-sqs-role-${var.environment}"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "apigateway.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "apigw_sqs_policy" {
+  name = "apigw-sqs-policy-${var.environment}"
+  role = aws_iam_role.apigw_sqs_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = "sqs:SendMessage"
+        Resource = aws_sqs_queue.webhook_buffer.arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "eventbridge_pipes_role" {
+  name = "eventbridge-pipes-role-${var.environment}"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "pipes.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "eventbridge_pipes_policy" {
+  name = "eventbridge-pipes-policy-${var.environment}"
+  role = aws_iam_role.eventbridge_pipes_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes"
+        ]
+        Resource = aws_sqs_queue.webhook_buffer.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kafka-cluster:Connect",
+          "kafka-cluster:DescribeCluster",
+          "kafka-cluster:WriteData"
+        ]
+        Resource = aws_msk_cluster.central_bus.arn
+      }
+    ]
+  })
+}

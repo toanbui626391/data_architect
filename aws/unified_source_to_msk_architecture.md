@@ -143,3 +143,75 @@ By unifying on MSK Connect, we also unify our observability stack. We do not hav
 | **DLQ Contains Messages** | MSK Topic: `*.dlq` (Count > 0) | **P1** | Investigate Source Payload |
 | **Consumer Lag Growing** | `MaxOffsetLag` increases > 5 min | **P2** | Check Databricks / Snowflake |
 | **Throughput Drop** | `MessagesInPerSec` = 0 | **P2** | Check Upstream Source |
+
+---
+
+## 6. Alternative Pattern: Push-Based Webhook Ingestion
+
+In enterprise scenarios where direct inbound access to a source system (like a third-party managed SAP instance) or API credential sharing is strictly prohibited by security policies, the standard "Pull/Subscribe" model cannot be used.
+
+For these strict environments, we deploy a **Push-Based (Webhook)** architecture. The data owners are responsible for pushing events outwards, and we provide a highly secure "front door" to receive them and drop them directly onto the MSK bus.
+
+### 6.1 Push-Based Architecture Diagram
+
+```mermaid
+flowchart TD
+    %% Third Party Sources
+    subgraph ThirdPartyEnv [External / Third-Party Managed]
+        SAPEventMesh["SAP Event Mesh / ABAP Trigger"]
+        SFDCOutbound["Salesforce Outbound Messages"]
+    end
+
+    %% AWS API Tier
+    subgraph APITier [AWS Edge & API Layer]
+        WAF["AWS WAF <br>&#40;Web Application Firewall&#41;"]
+        APIGateway["Amazon API Gateway <br>&#40;REST Endpoint&#41;"]
+    end
+
+    %% Customer VPC
+    subgraph CustomerVPC [AWS Customer VPC]
+        direction TB
+        subgraph MessageBus [Centralized Message Bus]
+            MSK["Amazon MSK <br>&#40;Apache Kafka Brokers&#41;"]
+        end
+    end
+
+    %% Control Plane
+    subgraph ControlPlane [AWS Control Plane]
+        CloudWatch["Amazon CloudWatch"]
+    end
+
+    %% Data Flow
+    SAPEventMesh -.->|HTTPS POST| WAF
+    SFDCOutbound -.->|HTTPS POST| WAF
+    WAF --> APIGateway
+    
+    %% API Gateway Service Proxy to MSK
+    APIGateway -->|AWS Service Proxy Integration| MSK
+
+    %% Monitoring
+    APIGateway -.->|4XX / 5XX Errors| CloudWatch
+    
+    %% Styling
+    classDef edge fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
+    classDef storage fill:#e2f0d9,stroke:#385723,stroke-width:1px,color:#000;
+    classDef process fill:#dae8fc,stroke:#6c8ebf,stroke-width:1px,color:#000;
+    classDef monitor fill:#fff2cc,stroke:#d6b656,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
+    
+    class WAF,APIGateway edge;
+    class MSK storage;
+    class SAPEventMesh,SFDCOutbound process;
+    class CloudWatch monitor;
+```
+
+### 6.2 Edge Schema Enforcement
+When using MSK Connect, we rely on the AWS Glue Schema Registry for data quality. In the Push-Based pattern, we push schema validation to the very edge using **Amazon API Gateway Request Validators**.
+*   We define the expected payload format (e.g., Salesforce Account JSON) using an OpenAPI 3.0 schema directly in API Gateway.
+*   If the third-party system pushes a malformed payload (missing a required field), API Gateway immediately rejects the request with a `400 Bad Request`.
+*   This prevents "garbage" data from ever crossing into the AWS VPC or landing on the Kafka topic, enforcing Data Contract guarantees without needing custom code.
+
+### 6.3 Observability Adaptations
+When relying on external parties to push data, our monitoring must shift to track *their* success rate. We add specific API Gateway metrics to our CloudWatch alarms:
+*   **`4XXError` (Client Errors):** A spike in 400 errors indicates the source system has changed its payload schema and API Gateway is rejecting it.
+*   **`5XXError` (Server Errors):** Indicates API Gateway cannot reach the MSK Brokers (e.g., VPC endpoint issues).
+*   **`Count` (Throughput):** A drop to zero indicates the source system's trigger has silently failed and is no longer pushing data.

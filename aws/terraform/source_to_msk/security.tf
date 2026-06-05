@@ -73,7 +73,10 @@ resource "aws_iam_role_policy" "msk_connect_policy" {
           "secretsmanager:GetSecretValue",
           "secretsmanager:DescribeSecret"
         ]
-        Resource = aws_secretsmanager_secret.sap_credentials.arn
+        Resource = [
+          aws_secretsmanager_secret.sap_credentials.arn,
+          aws_secretsmanager_secret.salesforce_credentials.arn
+        ]
       },
       {
         Effect = "Allow"

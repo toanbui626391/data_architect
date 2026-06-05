@@ -22,3 +22,23 @@ resource "aws_glue_schema" "sap_sales_orders" {
 }
 EOF
 }
+
+resource "aws_glue_schema" "sfdc_account" {
+  schema_name       = "sfdc.account.v1"
+  registry_arn      = aws_glue_registry.sap_schema_registry.arn
+  data_format       = "AVRO"
+  compatibility     = "BACKWARD"
+  schema_definition = <<EOF
+{
+  "type": "record",
+  "name": "Account",
+  "namespace": "com.salesforce",
+  "fields": [
+    {"name": "Id", "type": "string"},
+    {"name": "Name", "type": ["null", "string"], "default": null},
+    {"name": "Industry", "type": ["null", "string"], "default": null},
+    {"name": "LastModifiedDate", "type": "long", "logicalType": "timestamp-millis"}
+  ]
+}
+EOF
+}

@@ -43,3 +43,21 @@ variable "sap_db_password" {
   description = "SAP HANA Database Password"
   sensitive   = true
 }
+
+variable "salesforce_client_id" {
+  type        = string
+  description = "Salesforce OAuth Client ID"
+  sensitive   = true
+}
+
+variable "salesforce_private_key" {
+  type        = string
+  description = "Salesforce OAuth Private Key (JWT)"
+  sensitive   = true
+}
+
+variable "salesforce_login_url" {
+  type        = string
+  description = "Salesforce Login URL"
+  default     = "https://login.salesforce.com"
+}

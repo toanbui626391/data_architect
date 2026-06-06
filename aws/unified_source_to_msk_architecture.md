@@ -41,7 +41,12 @@ flowchart TD
         subgraph IngestionTier [Unified Compute & API Tier]
             MSKConnect["Amazon MSK Connect <br>&#40;Pull/Subscribe Workers&#41;"]
             APIGateway["Amazon API Gateway <br>&#40;Push/Webhook Receiver&#41;"]
+            BulkProcessor["AWS Glue / Lambda <br>&#40;Backfill Processor&#41;"]
             Secrets["AWS Secrets Manager <br>&#40;Credentials&#41;"]
+        end
+
+        subgraph StorageTier [AWS Storage Services]
+            S3Bulk[("Amazon S3 <br>&#40;Historical Bulk Drop&#41;")]
         end
 
         subgraph MessageBus [Centralized Message Bus]
@@ -80,6 +85,13 @@ flowchart TD
     SFDCOutbound -.->|HTTPS POST| WAF
     WAF --> APIGateway
     
+    %% Data Flow (Hybrid / Historical Backfill)
+    SAPEventMesh -.->|Secure File Transfer| S3Bulk
+    SFDCOutbound -.->|Bulk Data Export| S3Bulk
+    S3Bulk -->|S3 Event Trigger| BulkProcessor
+    BulkProcessor --> GlueRegistry
+    BulkProcessor -->|Validated Avro| MSK
+
     %% Aggregation into Message Bus
     MSKConnect --> GlueRegistry
     GlueRegistry -->|Validated Avro| MSK
@@ -92,6 +104,7 @@ flowchart TD
     %% Monitoring Flow
     MSKConnect -.->|Task FAILED| CloudWatch
     APIGateway -.->|4XX/5XX Errors| CloudWatch
+    BulkProcessor -.->|Job FAILED| CloudWatch
     MSK -.->|Broker Health / Consumer Lag| CloudWatch
     DLQ -.->|Message Count > 0| CloudWatch
     
@@ -107,8 +120,8 @@ flowchart TD
     classDef edge fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     classDef alert fill:#ffe6cc,stroke:#d79b00,stroke-width:1px,color:#000;
     
-    class SAPHana,MSK,DLQ storage;
-    class Salesforce,MSKConnect,APIGateway,GlueRegistry,Databricks,Secrets process;
+    class SAPHana,MSK,DLQ,S3Bulk storage;
+    class Salesforce,MSKConnect,APIGateway,BulkProcessor,GlueRegistry,Databricks,Secrets process;
     class WAF edge;
     class DLQ bad;
     class CloudWatch,Lambda monitor;
@@ -186,3 +199,18 @@ When relying on external parties to push data, our monitoring must shift to trac
 *   **`4XXError` (Client Errors):** A spike in 400 errors indicates the source system has changed its payload schema and API Gateway is rejecting it.
 *   **`5XXError` (Server Errors):** Indicates API Gateway cannot reach the MSK Brokers (e.g., VPC endpoint issues).
 *   **`Count` (Throughput):** A drop to zero indicates the source system's trigger has silently failed and is no longer pushing data.
+
+---
+
+## 7. Hybrid Architecture: Backfilling Historical Data
+
+To complement the Push-Based approach, a **Hybrid Backfill Mechanism** handles the ingestion of historical data, which webhooks cannot natively retrieve. The push architecture ensures low-latency real-time streams, while the hybrid pipeline manages large bulk historical data loads.
+
+### 7.1 Historical Bulk Drop (Amazon S3)
+The source system administrator triggers a bulk export of historical data (e.g., CSV or JSON payloads) and securely transfers it into an **Amazon S3** bucket (`S3Bulk`) within the AWS Customer VPC.
+
+### 7.2 Bulk Processor (AWS Glue / Lambda)
+An S3 Event Notification triggers an **AWS Glue Job** (for massive datasets) or an **AWS Lambda function** (for smaller files). This processor parses the data, applies necessary transformations to match the webhook schema, and publishes the records to the AWS Glue Schema Registry for Avro serialization.
+
+### 7.3 Unification at the Message Bus
+Once serialized, the historical data is written to the exact same **Amazon MSK** topic as the real-time webhook events. This ensures that downstream consumers (e.g., Databricks) can process both historical backfill and real-time streams without knowing where the data originated.

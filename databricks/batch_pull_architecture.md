@@ -49,7 +49,7 @@ flowchart TD
 
     %% Medallion Processing Flow
     Extraction -->|3. Append Raw Payload| Bronze
-    Bronze -->|4. Delta MERGE (Upsert)| Silver
+    Bronze -->|4. Delta MERGE &#40;Upsert&#41;| Silver
     Silver -->|5. Aggregate & Join| Gold
 
     Gold -.-> AccessControl

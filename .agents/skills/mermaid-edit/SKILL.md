@@ -16,8 +16,9 @@ The user relies on the built-in VS Code Markdown preview to render Mermaid diagr
    - Define subgraph titles using the square bracket syntax: `subgraph ID [Title with Spaces & Characters]`.
 
 2. **Syntax Compatibility & Best Practices:**
-   - **Special Characters in Nodes:** If a node label contains parentheses or other potentially conflicting characters, it is highly recommended to use HTML entities (e.g., `&#40;` for `(` and `&#41;` for `)`) to prevent parser confusion.
-     - *Correct:* `Event[Event Notification <br>&#40;SQS/EventGrid/PubSub&#41;]`
+   - **Special Characters in Nodes and Edges:** If a node label OR an edge/link label contains parentheses or other potentially conflicting characters, you MUST use HTML entities (e.g., `&#40;` for `(` and `&#41;` for `)`) to prevent parser confusion and rendering errors.
+     - *Correct Node:* `Event[Event Notification <br>&#40;SQS/EventGrid/PubSub&#41;]`
+     - *Correct Edge:* `NodeA -->|Returns Data &#40;JSON/CSV&#41;| NodeB`
    - **Avoid Bleeding-Edge Syntax:** While the parser is modern, avoid highly experimental or beta diagram types (e.g., `architecture-beta`) unless explicitly requested or verified.
 
 3. **Small Screen Optimization:**

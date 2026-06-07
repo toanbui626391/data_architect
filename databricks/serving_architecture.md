@@ -48,9 +48,9 @@ flowchart LR
         subgraph AI [3. LLM & AI Agents]
             direction TB
             VectorSearch[Vector Search]
-            MosaicAI[Mosaic AI Gateway]
+            UnityAIGW[Unity AI Gateway]
             Genie[AI/BI Genie]
-            VectorSearch --> MosaicAI
+            VectorSearch --> UnityAIGW
         end
 
         subgraph APILayer [4. API & Product Layer]
@@ -77,7 +77,7 @@ flowchart LR
 
     %% Specific Integration Flows
     ModelServing --> AWSAPIGW
-    MosaicAI --> AWSAPIGW
+    UnityAIGW --> AWSAPIGW
 
     %% Consumer Access
     Lakeview & ExtBI & Genie --> BizUsers
@@ -91,7 +91,7 @@ flowchart LR
     classDef security fill:#e1d5e7,stroke:#9673a6,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
 
     class GoldDim,GoldFact,FeatureStore,VectorSearch,OnlineTables storage;
-    class SQLWH,ModelServing,MosaicAI,Genie,SQLAPI process;
+    class SQLWH,ModelServing,UnityAIGW,Genie,SQLAPI process;
     class AWSAPIGW security;
     class BizUsers,DataSci,ExtApps monitor;
 ```
@@ -131,7 +131,7 @@ Optimized for serving curated features and traditional ML model predictions
 Designed to power Generative AI, Retrieval-Augmented Generation (RAG), and
 autonomous agents using Databricks Mosaic AI.
 
-*   **Mosaic AI Gateway:** Acts as the unified control plane for LLMs, providing
+*   **Unity AI Gateway:** Acts as the unified control plane for LLMs, providing
     rate limiting, credential management, and payload logging for security.
 *   **Vector Search:** Text data embedded from the Gold Layer is synced to
     Databricks Vector Search indexes. This provides the retrieval mechanism for
@@ -172,7 +172,7 @@ permissions remain consistent regardless of how the data is served.
 | **BI Consumer** | `GRANT SELECT ON CATALOG curated` | Unity Catalog (RBAC) |
 | **Ext. App (API)**| Service Principal PAT / OAuth | AWS API GW + UC |
 | **AI/BI Genie** | `GRANT USE SCHEMA` on Gold | Unity Catalog |
-| **Mosaic AI** | Provisioned via MLflow Registry | Unity Catalog / MLflow |
+| **Unity AI Gateway**| Provisioned via MLflow Registry | Unity Catalog / MLflow |
 
 *   **Row-Level Security & Column Masking:** Any RLS or masking policies defined
     on the Gold tables automatically apply to SQL Warehouses, Lakeview, and

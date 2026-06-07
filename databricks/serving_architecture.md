@@ -40,7 +40,7 @@ flowchart LR
 
         subgraph ML [2. Machine Learning]
             direction TB
-            FeatureStore[Feature Store]
+            FeatureStore[Feature Engineering]
             ModelServing[Model Serving]
             FeatureStore --> ModelServing
         end
@@ -55,10 +55,10 @@ flowchart LR
 
         subgraph APILayer [4. API & Product Layer]
             direction TB
-            OnlineTables[Online Tables]
+            Lakebase[(Lakebase Synced Tables)]
             SQLAPI[SQL Statement API]
             AWSAPIGW{AWS API Gateway}
-            OnlineTables --> AWSAPIGW
+            Lakebase --> AWSAPIGW
         end
     end
 
@@ -90,7 +90,7 @@ flowchart LR
     classDef monitor fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
     classDef security fill:#e1d5e7,stroke:#9673a6,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
 
-    class GoldDim,GoldFact,FeatureStore,VectorSearch,OnlineTables storage;
+    class GoldDim,GoldFact,FeatureStore,VectorSearch,Lakebase storage;
     class SQLWH,ModelServing,UnityAIGW,Genie,SQLAPI process;
     class AWSAPIGW security;
     class BizUsers,DataSci,ExtApps monitor;
@@ -119,46 +119,57 @@ scans, and ad-hoc analytical queries.
 Optimized for serving curated features and traditional ML model predictions
 (e.g., fraud detection, recommendation scores) with low latency.
 
-*   **Feature Store:** Gold tables are registered in the Databricks Feature
-    Store. Offline features are used for training; Online Store synchronization
-    provides low-latency feature lookups for real-time inference.
+*   **Feature Engineering:** Gold tables are registered as Feature Tables in
+    Unity Catalog. Offline features are used for training. For online serving,
+    features are published to the Online Store (Lakebase / Online Tables) to
+    support point lookups.
+*   **Feature Spec (`FeatureSpec`):** Reusable logical sets of features and
+    functions are registered in Unity Catalog. These specify the lookups and
+    computations needed for serving.
+*   **Automatic Feature Lookup:** MLflow models logged with feature metadata
+    automatically perform point-in-time lookups from the Online Store using
+    request entity IDs (e.g., `customer_id`), eliminating training-serving
+    skew and client-side feature retrieval logic.
 *   **Model Serving:** MLflow registered models are deployed to Databricks
-    Serverless Model Serving endpoints. These endpoints auto-scale based on
-    request volume and scale to zero when idle.
+    Serverless Model Serving endpoints. These endpoints automatically scale
+    based on request volume and handle the automatic feature lookups.
 
 ### 3.3 Track 3: LLM & AI Agent Serving
 
 Designed to power Generative AI, Retrieval-Augmented Generation (RAG), and
 autonomous agents using Databricks Mosaic AI.
 
-*   **Unity AI Gateway:** Acts as the unified control plane for LLMs, providing
-    rate limiting, credential management, and payload logging for security.
+*   **Unity AI Gateway:** Acts as the unified control plane for LLMs. It manages
+    external credentials, rate limits, and caching. Gateway policies apply
+    guardrails including PII redacting and content safety at the edge.
 *   **Vector Search:** Text data embedded from the Gold Layer is synced to
-    Databricks Vector Search indexes. This provides the retrieval mechanism for
-    RAG applications.
+    Databricks Vector Search indexes. Delta Sync indexes auto-replicate changes
+    from the source Delta table, acting as the retrieval engine for RAG.
 *   **AI/BI Genie:** Provides a natural language interface over the Gold Star
-    Schema. Business users can ask questions in plain English, and Genie
-    translates them into optimized SQL queries executed on SQL Warehouses.
+    Schema. Curated via custom instructions and example SQL queries, Genie
+    translates questions into SQL queries executed on SQL Warehouses.
 
 ### 3.4 Track 4: API & Product Layer
 
 Designed to serve data programmatically to external enterprise applications and
 microservices. This track utilizes **AWS API Gateway** as the unified front door.
 
-*   **Low-Latency OLTP Lookups:**
-    *   **Online Tables:** Gold tables are synchronized to Databricks Online
-        Tables, providing sub-millisecond, highly concurrent key-value lookups.
-    *   **Integration:** AWS API Gateway routes incoming operational requests
-        to Databricks Model Serving endpoints (which wrap the Online Table
-        lookups), providing secure, low-latency REST access.
+*   **Low-Latency OLTP Serving (Lakebase):**
+    *   **Lakebase Synced Tables:** Gold tables are replicated to Lakebase
+        (managed serverless PostgreSQL) using Lakeflow pipelines, providing
+        sub-10ms, high-concurrency read access via standard Postgres.
+    *   **Legacy Online Tables:** Standard Delta tables can also sync to
+        Online Tables for key-value lookups when Postgres features are
+        not required.
+    *   **Integration:** AWS API Gateway queries Lakebase via standard JDBC,
+        or routes requests to Model Serving endpoints wrapping the synced data.
 *   **Bulk / Asynchronous Data Access:**
     *   **SQL Statement API:** For external systems needing to extract larger
-        datasets or run complex queries, AWS API Gateway can proxy requests to
-        the Databricks SQL Statement Execution API. This handles async execution
-        and pagination.
-*   **Security & Rate Limiting:** AWS API Gateway manages API keys, client
-    authentication (Cognito/IAM), rate limiting (Throttling), and WAF protection
-    before any traffic hits the Databricks Lakehouse.
+        datasets or run complex queries, AWS API Gateway proxies requests
+        to the SQL Statement Execution API (handling async pagination).
+*   **Security & Rate Limiting:** AWS API Gateway manages client API keys,
+    authentication (Cognito/IAM), rate limiting, and WAF protection before
+    routing operational queries to the Databricks serving layer.
 
 ---
 
@@ -185,13 +196,14 @@ permissions remain consistent regardless of how the data is served.
 With a heavily serverless architecture, comprehensive observability is required
 to monitor performance and manage costs.
 
-*   **System Tables:** All serving layer activity is automatically logged to
-    Unity Catalog system tables (e.g., `system.query.history`,
-    `system.serving.endpoint_payloads`).
+*   **Inference Tables:** Model serving and Unity AI Gateway endpoints log
+    request and response payloads automatically to UC Inference Tables. These
+    support schema evolution, request tracing, and compliance auditing.
+*   **System Tables:** Analytical activities are logged to Unity Catalog
+    system tables (e.g., `system.query.history` for SQL Warehouses and
+    `system.billing.usage` for serverless spend tracking).
 *   **API Gateway Metrics:** AWS API Gateway provides CloudWatch metrics for
-    external API latency, error rates (4xx/5xx), and throttle counts.
-*   **FinOps Dashboards:** A dedicated Databricks dashboard queries the
-    `system.billing.usage` table to track DBU consumption across SQL Warehouses,
-    Model Serving, and Vector Search, breaking down costs by workspace and tag.
-*   **Alerting:** Databricks SQL Alerts trigger notifications if serverless
-    spend exceeds daily budgets or if serving endpoint latency spikes.
+    latency, error rates (4xx/5xx), and client throttling counts.
+*   **FinOps & Spend Alerts:** A Databricks dashboard queries billing
+    system tables to track DBU consumption across warehouses and endpoints,
+    triggering alerts if daily spend targets are exceeded.

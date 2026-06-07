@@ -123,16 +123,25 @@ Optimized for serving curated features and traditional ML model predictions
     Unity Catalog. Offline features are used for training. For online serving,
     features are published to the Online Store (Lakebase / Online Tables) to
     support point lookups.
-*   **Feature Spec (`FeatureSpec`):** Reusable logical sets of features and
-    functions are registered in Unity Catalog. These specify the lookups and
-    computations needed for serving.
-*   **Automatic Feature Lookup:** MLflow models logged with feature metadata
-    automatically perform point-in-time lookups from the Online Store using
-    request entity IDs (e.g., `customer_id`), eliminating training-serving
-    skew and client-side feature retrieval logic.
-*   **Model Serving:** MLflow registered models are deployed to Databricks
-    Serverless Model Serving endpoints. These endpoints automatically scale
-    based on request volume and handle the automatic feature lookups.
+*   **Model Training Flow (Offline):**
+    *   **Environment:** Data Scientists write training code in Databricks
+        Notebooks or automate it via Databricks Workflows (Jobs) running on
+        CPU/GPU clusters.
+    *   **Feature Retrieval:** The `FeatureEngineeringClient` uses a
+        `FeatureLookup` to perform point-in-time correct joins against Gold
+        tables, creating the training dataset.
+    *   **Logging:** The model is logged using `fe.log_model` and registered in
+        the Unity Catalog Model Registry (under `catalog.models.model_name`).
+*   **Model Serving Flow (Online):**
+    *   **Feature Spec (`FeatureSpec`):** Reusable logical sets of features and
+        functions are registered in Unity Catalog, defining the lookups and
+        computations needed for serving.
+    *   **Endpoint Deployment:** MLflow models are deployed to Serverless Model
+        Serving endpoints. Endpoints scale to zero when idle to save cost.
+    *   **Automatic Feature Lookup:** At inference time, the client sends only
+        the entity key (e.g., `customer_id`). The serving endpoint
+        automatically fetches feature columns from the Lakebase online store,
+        joins them to the payload, and scores the model, eliminating skew.
 
 ### 3.3 Track 3: LLM & AI Agent Serving
 

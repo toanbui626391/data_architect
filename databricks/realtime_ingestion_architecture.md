@@ -64,6 +64,14 @@ flowchart TD
         SQLAlert["Databricks SQL Alerts"]
     end
 
+    %% Governance Plane
+    subgraph GovernancePlane [Unity Catalog &#40;Governance & Access Control&#41;]
+        UC["Unity Catalog <br>&#40;Metastore&#41;"]
+        Lineage["Data Lineage <br>&#40;Column-Level&#41;"]
+        AuditLog["Audit Logs <br>&#40;CloudTrail / System Tables&#41;"]
+        TagEngine["Data Classification <br>&#40;PII / Confidential Tags&#41;"]
+    end
+
     %% External Notification Target
     Notification["Slack / PagerDuty"]
 
@@ -89,6 +97,14 @@ flowchart TD
     Spark --> Bronze
     Bronze -->|DLT Expectations <br>&#40;ON VIOLATION WARN&#41;| Silver
     Silver --> Gold
+
+    %% Governance Flow
+    Bronze -.->|Register + Tag| UC
+    Silver -.->|Register + Tag| UC
+    Gold -.->|Register + Tag| UC
+    UC -.->|Column Lineage| Lineage
+    UC -.->|Access Events| AuditLog
+    UC -.->|PII / Sensitivity| TagEngine
 
     %% Networking
     Compute <-->|No Public IPs| VPCE
@@ -119,12 +135,15 @@ flowchart TD
     classDef network fill:#f9f9f9,stroke:#666,stroke-width:2px,color:#000,stroke-dasharray: 5 5;
     classDef alert fill:#ffe6cc,stroke:#d79b00,stroke-width:1px,color:#000;
     
+    classDef gov fill:#e1d5e7,stroke:#9673a6,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
+
     class InternalDB,PartnerDB,Bronze,Silver,Gold storage;
     class SaaSConn,PartnerConn,CDCConn,SchemaReg,Kafka,Spark,DLT process;
     class KafkaDLQ bad;
     class CC,EventLog,SQLAlert monitor;
     class CustomerVPC,ControlPlane,VPCE,NetworkEgress network;
     class Notification alert;
+    class UC,Lineage,AuditLog,TagEngine gov;
 ```
 
 ---
@@ -297,3 +316,123 @@ The pipeline does not end at Silver. Analytics Engineering teams build the **Gol
 *   **Pattern:** Gold uses DLT **Materialized Views** to compute aggregations (e.g., daily revenue, active users) over Silver Streaming Tables. They refresh automatically when upstream Silver data changes.
 *   **Business Logic Validation:** We apply SQL `CONSTRAINT ... ON VIOLATION WARN` clauses directly to Gold Materialized Views to validate semantic aggregations (e.g., `total_revenue >= 0`). This ensures dashboards remain online, but any logic bugs are flagged in the DLT Event Log for Analytics Engineers to investigate.
 *   **Consumers:** BI tools (Tableau, PowerBI), Databricks SQL dashboards, and ML Feature Stores query exclusively from the Gold layer. Direct access to Bronze or Silver is blocked by Unity Catalog RBAC.
+
+---
+
+## 10. Governance & Access Control &#40;Databricks on AWS&#41;
+
+Governance is enforced at every layer of the platform using **Unity Catalog** as the single control plane, integrated with AWS-native identity services.
+
+### 10.1 Identity & Authentication
+
+All human users and service principals authenticate through a single identity chain:
+
+| Principal Type | Authentication Method | Managed By |
+| :--- | :--- | :--- |
+| Human Users | SSO via **AWS IAM Identity Center** &#40;SAML 2.0 / OIDC&#41; | Corporate IdP &#40;Okta / Azure AD&#41; |
+| Service Principals | Databricks OAuth M2M token | Databricks Account Admin |
+| Cluster IAM Access | **IAM Instance Profile** attached to EC2 nodes | AWS IAM |
+| Secret Access | **AWS Secrets Manager** via Databricks Secret Scope | Platform Team |
+
+### 10.2 Unity Catalog — Three-Level Namespace
+
+All data assets in Databricks are registered under a strict three-level hierarchy:
+
+```
+Catalog  →  Schema  →  Table / View
+────────────────────────────────────────
+raw      →  kafka   →  bronze_orders
+conform  →  sales   →  silver_orders
+serving  →  finance →  gold_fact_revenue
+```
+
+*   **`raw` catalog:** Bronze tables. Access restricted to the Data Engineering service principal and pipeline authors only.
+*   **`conform` catalog:** Silver tables. Read access granted to Analytics Engineering and Data Science teams.
+*   **`serving` catalog:** Gold tables. Read access granted to BI tools, Databricks SQL dashboards, and external consumers.
+
+### 10.3 Role-Based Access Control &#40;RBAC&#41;
+
+Access is granted at the Unity Catalog level using SQL `GRANT` statements — never at the S3 bucket level directly.
+
+```sql
+-- Data Engineers: full access to raw pipeline tables
+GRANT USE CATALOG, USE SCHEMA, SELECT, MODIFY
+  ON CATALOG raw TO `data-engineering-sp`;
+
+-- Analytics team: read Silver and Gold
+GRANT SELECT ON SCHEMA conform.sales TO `analytics-team`;
+GRANT SELECT ON SCHEMA serving.finance TO `analytics-team`;
+
+-- BI service account: Gold read-only
+GRANT SELECT ON SCHEMA serving.finance TO `powerbi-service-principal`;
+
+-- Deny direct Silver access to BI tools (enforced by omission)
+-- No GRANT on conform.* to `powerbi-service-principal`
+```
+
+### 10.4 Data Classification & PII Tagging
+
+All columns containing sensitive data are tagged at registration time using **Unity Catalog Tags**. The tag engine drives both access policy decisions and audit reporting.
+
+| Tag | Example Columns | Effect |
+| :--- | :--- | :--- |
+| `pii.direct` | `email`, `ssn`, `phone_number` | Masked for non-privileged roles |
+| `pii.quasi` | `date_of_birth`, `zip_code` | Flagged in lineage; access logged |
+| `confidential` | `order_total`, `salary` | Restricted to Finance role only |
+| `public` | `product_id`, `region_code` | No restriction |
+
+**Dynamic Data Masking** is applied at the Unity Catalog layer using Row Filters and Column Masks — no changes needed in application code:
+
+```sql
+-- Mask PII for non-privileged users at query time
+ALTER TABLE conform.sales.silver_customers
+  ALTER COLUMN email
+  SET MASK catalog.security.mask_email
+    USING COLUMNS (email);
+```
+
+### 10.5 S3 Bucket-Level Access Isolation
+
+Because Delta tables are backed by S3, Unity Catalog manages S3 access through **Storage Credentials** and **External Locations** — not raw IAM bucket policies.
+
+```
+Unity Catalog External Location
+  └── s3://enterprise-lakehouse/raw/      → raw catalog only
+  └── s3://enterprise-lakehouse/conform/  → conform catalog only
+  └── s3://enterprise-lakehouse/serving/  → serving catalog only
+```
+
+Cluster IAM Instance Profiles have **no direct S3 permissions**. All S3 access is proxied through Unity Catalog, ensuring no user can bypass catalog-level RBAC by querying S3 directly.
+
+### 10.6 Audit Logging
+
+Every data access event is automatically emitted to two destinations:
+
+1.  **Databricks System Tables** &#40;`system.access.audit`&#41;: Queryable via Databricks SQL for internal data access reporting.
+2.  **AWS CloudTrail**: All S3 API calls &#40;`GetObject`, `PutObject`&#41; made by Databricks clusters are logged centrally for security and compliance teams.
+
+```sql
+-- Query Unity Catalog audit log for PII column access in last 7 days
+SELECT user_name, action_name, request_params.table_full_name, event_time
+FROM system.access.audit
+WHERE action_name = 'selectTable'
+  AND request_params.table_full_name LIKE 'conform.sales.%'
+  AND event_time >= current_date() - INTERVAL 7 DAYS
+ORDER BY event_time DESC;
+```
+
+### 10.7 Column-Level Lineage
+
+Unity Catalog automatically captures **column-level lineage** for all DLT pipelines and SQL queries — no manual instrumentation required.
+
+Example lineage chain:
+```
+Salesforce API  →  kafka.raw.sfdc_account.Name
+              →  conform.sales.silver_account.customer_name
+              →  serving.finance.gold_revenue.customer_name
+              →  PowerBI Dashboard: Revenue by Customer
+```
+
+This enables:
+*   **Impact analysis:** Before changing an upstream SAP field, see all downstream Gold tables and dashboards affected.
+*   **Compliance tracing:** For GDPR right-to-erasure, identify every table containing a specific customer's PII column.

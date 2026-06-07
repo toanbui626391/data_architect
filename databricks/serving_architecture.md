@@ -41,8 +41,11 @@ flowchart LR
         subgraph ML [2. Machine Learning]
             direction TB
             FeatureStore[Feature Engineering]
-            ModelServing[Model Serving]
-            FeatureStore --> ModelServing
+            ModelTraining[Model Training - MLflow]
+            ModelServing[Model Serving - MLflow]
+            FeatureStore --> ModelTraining
+            ModelTraining --> ModelServing
+            FeatureStore -.->|Auto Lookup| ModelServing
         end
 
         subgraph AI [3. LLM & AI Agents]
@@ -91,7 +94,7 @@ flowchart LR
     classDef security fill:#e1d5e7,stroke:#9673a6,stroke-width:1px,color:#000,stroke-dasharray: 5 5;
 
     class GoldDim,GoldFact,FeatureStore,VectorSearch,Lakebase storage;
-    class SQLWH,ModelServing,UnityAIGW,Genie,SQLAPI process;
+    class SQLWH,ModelServing,ModelTraining,UnityAIGW,Genie,SQLAPI process;
     class AWSAPIGW security;
     class BizUsers,DataSci,ExtApps monitor;
 ```

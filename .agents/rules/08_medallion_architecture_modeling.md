@@ -58,7 +58,17 @@ All data warehouse and lakehouse pipelines MUST follow the Medallion Architectur
 
 **Purpose:** Business-level aggregations and dimensional models for BI, reporting, and Machine Learning.
 
-*   **DLT Type:** `CREATE OR REFRESH MATERIALIZED VIEW`. DLT automatically computes these incrementally using the upstream Silver CDF, without full table scans.
-*   **Structure:** MUST use **Kimball Star Schema** (Fact + Dimension tables) or aggregated Materialized Views. Snowflake schemas (dimension-to-dimension joins) are **strictly forbidden**.
-*   **Source Filter:** Always filter out semantically invalid states at the source (e.g., `WHERE order_status IN ('COMPLETED', 'SHIPPED')`).
-*   **Data Quality:** Apply **semantic business constraints** using `ON VIOLATION WARN` (e.g., `total_revenue >= 0`). Failures here indicate upstream business logic bugs, not ingestion errors.
+*   **DLT Type:** `CREATE OR REFRESH STREAMING TABLE` reading incrementally from
+    `STREAM(catalog.silver.entity)`. Enable CDF
+    (`"delta.enableChangeDataFeed" = "true"`) and Row Tracking
+    (`"delta.enableRowTracking" = "true"`) on all Gold tables to support
+    both downstream analytical consumption and real-time replication to
+    Databricks Online Tables.
+*   **Structure:** MUST use **Kimball Star Schema** (Fact + Dimension tables) or
+    aggregated structures. Snowflake schemas (dimension-to-dimension joins) are
+    **strictly forbidden**.
+*   **Source Filter:** Always filter out semantically invalid states at the
+    source (e.g., `WHERE order_status IN ('COMPLETED', 'SHIPPED')`).
+*   **Data Quality:** Apply **semantic business constraints** using `ON
+    VIOLATION WARN` (e.g., `total_revenue >= 0`). Failures here indicate
+    upstream business logic bugs, not ingestion errors.

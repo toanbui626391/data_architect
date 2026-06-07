@@ -9,7 +9,10 @@ All data warehouse and lakehouse pipelines MUST follow the Medallion Architectur
 *   **Idempotency:** Every pipeline must be fully idempotent. Re-running it must never cause data loss or duplication. Use streaming checkpoints (DLT) or deterministic `MERGE` keys (Snowflake) to guarantee this.
 *   **Separation of Concerns:** Never mix ingestion, cleansing, or aggregation logic in a single model. Each layer has a single, defined responsibility.
 *   **Naming Convention:** All tables MUST use the fully qualified Unity Catalog path: `catalog.{layer}.{entity}` (e.g., `catalog.bronze.sales_orders`). Never use implicit schema references.
-*   **Storage Optimization:** Use **Liquid Clustering** (`CLUSTER BY`) on all Delta tables. **Never use `PARTITIONED BY`** unless explicitly required for legacy compatibility.
+*   **Storage Optimization:** Use **Liquid Clustering** (`CLUSTER BY`) on all
+    Delta tables. **Never use `PARTITIONED BY`** unless legacy compatibility
+    demands it. Enable Row Tracking (`"delta.enableRowTracking" = "true"`)
+    on Silver and Gold tables to optimize incremental Materialized Views.
 *   **Audit Columns:** Every table in every layer MUST contain pipeline lineage columns:
     *   Bronze: `_ingested_at TIMESTAMP`, `_ingested_date DATE`
     *   Silver: `_bronze_ingested_at TIMESTAMP`, `_silver_processed_at TIMESTAMP`
@@ -37,7 +40,10 @@ All data warehouse and lakehouse pipelines MUST follow the Medallion Architectur
 **Purpose:** Single source of truth for typed, deduplicated, and standardized enterprise entities.
 
 *   **DLT Type:** Use a `STREAMING LIVE VIEW` for cleansing/DQ, then `APPLY CHANGES INTO` a `STREAMING TABLE` target for deduplication. This two-step pattern separates concerns cleanly.
-*   **CDF:** **Enable Change Data Feed** (`"delta.enableChangeDataFeed" = "true"`). Gold Materialized Views depend on this to compute aggregations incrementally.
+*   **CDF & Row Tracking:** Enable Change Data Feed
+    (`"delta.enableChangeDataFeed" = "true"`) and Row Tracking
+    (`"delta.enableRowTracking" = "true"`) to support high-performance
+    incremental materialized views and downstream replication.
 *   **Processing:**
     *   Parse raw payloads into strictly typed columns using `from_json` or `CAST`.
     *   Standardize formats: strings to `UPPER(TRIM(...))`, amounts to `DECIMAL(18,2)`, currencies to ISO codes.

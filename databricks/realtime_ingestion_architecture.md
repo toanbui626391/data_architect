@@ -188,6 +188,7 @@ DLT is a declarative framework (similar to Snowflake Dynamic Tables) that allows
 In DLT, we utilize two distinct concepts to optimize real-time performance:
 *   **Streaming Tables (Bronze & Silver):** Process data exactly once. They are append-only and strictly evaluate new records arriving in the stream, making them highly efficient for parsing massive event logs.
 *   **Materialized Views (Gold):** Used for the final presentation layer. DLT automatically computes incremental updates to aggregations (e.g., calculating rolling averages or total sales per region) based on the fresh data arriving in Silver.
+    *   **Refresh Mode:** For real-time dashboards, Gold MVs **must** be run in `CONTINUOUS` pipeline mode (not the default triggered/batch mode). This ensures that as soon as new data arrives in Silver, the Gold aggregations update within seconds. Triggered mode is acceptable only for non-real-time reporting that refreshes on a schedule.
 
 ---
 
@@ -266,13 +267,15 @@ To ensure the Real-Time Ingestion Architecture runs efficiently, securely, and c
 
 ### 7.1 Compute & Cost Optimization
 *   **Default to Serverless DLT:** Use Serverless DLT for automatic compute management and rapid scaling. If using Classic DLT, always enable **Enhanced Autoscaling** to handle sudden data spikes without over-provisioning.
+    *   **Networking Caveat:** Serverless DLT has regional limitations with custom VPC configurations (PrivateLink, VPC Peering, Transit Gateway). If your pipeline requires private connectivity to on-premises databases or Kafka brokers inside a Customer VPC, use **Classic DLT** running within the Customer VPC as the mandatory fallback.
 *   **Always-On Streaming:** Real-time DLT pipelines run in continuous streaming mode. `Trigger.AvailableNow` is a batch pattern and must NOT be used for real-time pipelines — it belongs in batch ingestion architectures.
 *   **Cluster Sizing (Classic DLT):** For streaming workloads, favor compute-optimized instances (e.g., AWS `c5` or Azure `Fsv2` series) over memory-optimized instances, as streaming is typically CPU-bound.
 
 ### 7.2 Storage & State Management
 *   **Let DLT Manage Maintenance:** DLT automatically handles `OPTIMIZE` (file compaction) and `VACUUM` (stale file removal) for your Delta tables. Do not run these commands manually on DLT-managed tables.
 *   **Checkpoint Locations:** Store stream checkpoints in robust cloud storage (S3/ADLS/GCS) rather than root DBFS to ensure state durability and avoid corruption during cluster restarts.
-*   **Change Data Feed (CDF) Prudence:** Only enable CDF on source tables if downstream pipelines actually require incremental upserts (`APPLY CHANGES INTO`). Leaving it on unnecessarily consumes excess storage.
+*   **Change Data Feed (CDF) — Not Required:** This architecture uses Debezium CDC rows appended from Kafka into an append-only Bronze Streaming Table. `APPLY CHANGES INTO` reads these rows as a standard Delta stream and processes the operation type column (`op` field) natively. **Do NOT manually enable CDF** (`delta.enableChangeDataFeed = true`) on Bronze or Silver tables — it is unnecessary overhead and only applies if an external job outside this DLT pipeline reads Delta change events using `readChangeFeed = true`.
+*   **Change Data Feed (CDF) Prudence:** Only enable CDF on source tables if downstream pipelines **outside this DLT pipeline** actually require incremental upserts via `table_changes()`. Leaving it on unnecessarily consumes excess storage.
 
 ### 7.3 Data Quality & Schema Operations
 *   **Monitor DLT Warnings:** Regularly query the DLT Event Log for expectation violations. A sudden spike indicates an upstream application has silently changed its data format or business logic, requiring engineering intervention.
@@ -436,3 +439,32 @@ Salesforce API  →  kafka.raw.sfdc_account.Name
 This enables:
 *   **Impact analysis:** Before changing an upstream SAP field, see all downstream Gold tables and dashboards affected.
 *   **Compliance tracing:** For GDPR right-to-erasure, identify every table containing a specific customer's PII column.
+
+---
+
+## 11. Disaster Recovery & Business Continuity
+
+For enterprise-grade resiliency, the architecture must survive an AWS regional outage.
+
+### 11.1 Delta Lake — Cross-Region Replication
+Delta Lake storage (on S3) is replicated to a secondary AWS region using one of two strategies:
+
+| Strategy | RPO | RTO | Use Case |
+| :--- | :--- | :--- | :--- |
+| **S3 Cross-Region Replication (CRR)** | Near-zero | Hours (manual failover) | Cost-effective active/passive |
+| **Delta Deep Clone** (scheduled) | Minutes to hours | Minutes | Consistent Delta snapshot with transaction log |
+
+**Recommended:** Use **S3 CRR** for continuous async replication combined with a daily scheduled `DEEP CLONE` job to ensure the secondary region Delta transaction log is consistent and queryable immediately on failover.
+
+```sql
+-- Daily DR snapshot: clone serving Gold tables to DR region bucket
+CREATE OR REPLACE TABLE dr_catalog.finance.gold_fact_revenue
+DEEP CLONE serving.finance.gold_fact_revenue
+LOCATION 's3://enterprise-lakehouse-dr/serving/finance/gold_fact_revenue';
+```
+
+### 11.2 Kafka — MirrorMaker 2 (MSK)
+For Amazon MSK, enable **MSK Replication** (built on MirrorMaker 2) to continuously replicate Kafka topic data to a standby MSK cluster in the secondary region. This ensures the Databricks pipeline in the DR region can resume consuming from the replicated topic with minimal offset lag.
+
+### 11.3 Databricks Workspace
+Databricks pipeline definitions (DLT pipelines, Workflows, notebooks) are deployed via **Databricks Asset Bundles (DABs)** stored in Git. In a failover event, the DR workspace can be re-provisioned from the same Git repository within minutes — no manual configuration is needed.

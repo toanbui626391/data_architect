@@ -41,7 +41,11 @@ flowchart TD
         subgraph IngestionTier [Unified Compute & API Tier]
             MSKConnect["Amazon MSK Connect <br>&#40;Pull/Subscribe Workers&#41;"]
             APIGateway["Amazon API Gateway <br>&#40;Push/Webhook Receiver&#41;"]
+            SQSBuffer[("SQS Buffer Queue")]
+            EBPipe["EventBridge Pipe"]
             Secrets["AWS Secrets Manager <br>&#40;Credentials&#41;"]
+            APIGateway -->|Service Proxy| SQSBuffer
+            SQSBuffer --> EBPipe
         end
 
         subgraph MessageBus [Centralized Message Bus]
@@ -85,7 +89,7 @@ flowchart TD
     GlueRegistry -->|Validated Avro| MSK
     GlueRegistry -.->|Validation Error| DLQ
     
-    APIGateway -->|AWS Service Proxy Integration| MSK
+    EBPipe --> MSK
 
     MSK --> Databricks
 
@@ -107,8 +111,8 @@ flowchart TD
     classDef edge fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     classDef alert fill:#ffe6cc,stroke:#d79b00,stroke-width:1px,color:#000;
     
-    class SAPHana,MSK,DLQ storage;
-    class Salesforce,MSKConnect,APIGateway,GlueRegistry,Databricks,Secrets process;
+    class SAPHana,MSK,DLQ,SQSBuffer storage;
+    class Salesforce,MSKConnect,APIGateway,GlueRegistry,Databricks,Secrets,EBPipe process;
     class WAF edge;
     class DLQ bad;
     class CloudWatch,Lambda monitor;
@@ -169,11 +173,16 @@ In enterprise scenarios where direct inbound access to a source system (like a t
 
 For these strict environments, we deploy a **Push-Based (Webhook)** architecture. The data owners are responsible for pushing events outwards, and we provide a highly secure "front door" to receive them and drop them directly onto the MSK bus.
 
-### 6.1 Unified Front Door Logic
+### 6.1 Unified Ingestion Routing
 
-As shown in the main architecture diagram, the architecture supports both methods simultaneously to reach the Central Message Bus:
-*   **Pull/Subscribe:** Using MSK Connect.
-*   **Push/Webhook:** Using API Gateway.
+As shown in the main diagram, the architecture supports both methods
+simultaneously to reach the Central Message Bus:
+*   **Pull/Subscribe:** MSK Connect pulls messages from the source and writes
+    them directly to MSK brokers.
+*   **Push/Webhook:** External systems push events to the API Gateway. Using a
+    zero-code AWS service proxy, API Gateway queues payloads into an
+    **SQS Buffer Queue** (to throttle surges). An **EventBridge Pipe**
+    polls SQS and streams messages directly to the MSK brokers.
 
 ### 6.2 Edge Schema Enforcement
 When using MSK Connect, we rely on the AWS Glue Schema Registry for data quality. In the Push-Based pattern, we push schema validation to the very edge using **Amazon API Gateway Request Validators**.

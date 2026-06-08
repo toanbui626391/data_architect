@@ -78,7 +78,7 @@ resource "aws_mskconnect_connector" "sap_sales_orders" {
   }
 
   kafka_cluster_client_authentication {
-    authentication_type = "NONE"
+    authentication_type = "IAM"
   }
 
   kafka_cluster_encryption_in_transit {
@@ -169,7 +169,7 @@ resource "aws_mskconnect_connector" "salesforce_cdc" {
   }
 
   kafka_cluster_client_authentication {
-    authentication_type = "NONE" # Update to IAM/SASL based on exact MSK Auth configured
+    authentication_type = "IAM"
   }
 
   kafka_cluster_encryption_in_transit {

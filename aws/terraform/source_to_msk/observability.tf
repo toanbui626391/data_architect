@@ -39,7 +39,7 @@ resource "aws_cloudwatch_metric_alarm" "sap_throughput_drop" {
 
   dimensions = {
     ClusterName = aws_msk_cluster.central_bus.cluster_name
-    Topic       = "sap.sales_orders.v1"
+    Topic       = "sap.sales_orders.SALES_ORDERS"
   }
 }
 
@@ -123,5 +123,42 @@ resource "aws_cloudwatch_metric_alarm" "apigw_5xx_errors" {
   dimensions = {
     ApiName = aws_api_gateway_rest_api.webhook_api.name
     Stage   = var.environment
+  }
+}
+
+# P1 Alert: DLQ Contains Messages (SAP)
+resource "aws_cloudwatch_metric_alarm" "sap_dlq_messages" {
+  alarm_name          = "SAPDeadLetterQueueSpike-${var.environment}"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "MessagesInPerSec"
+  namespace           = "AWS/Kafka"
+  period              = "60"
+  statistic           = "Sum"
+  threshold           = "0"
+  alarm_description   = "[P1] SAP MSK Connect failed serialization. Check DLQ."
+  alarm_actions       = [aws_sns_topic.alerts_topic.arn]
+
+  dimensions = {
+    ClusterName = aws_msk_cluster.central_bus.cluster_name
+    Topic       = "sap.sales_orders.dlq"
+  }
+}
+
+# P1 Alert: SQS Dead Letter Queue backlog (Webhook pipeline)
+resource "aws_cloudwatch_metric_alarm" "sqs_webhook_dlq_backlog" {
+  alarm_name          = "SQSWebhookDLQBacklog-${var.environment}"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = "60"
+  statistic           = "Maximum"
+  threshold           = "0"
+  alarm_description   = "[P1] Webhook events failed delivery to MSK (SQS DLQ)."
+  alarm_actions       = [aws_sns_topic.alerts_topic.arn]
+
+  dimensions = {
+    QueueName = aws_sqs_queue.webhook_dlq.name
   }
 }

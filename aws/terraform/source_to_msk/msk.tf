@@ -18,6 +18,7 @@ resource "aws_msk_cluster" "central_bus" {
   client_authentication {
     sasl {
       scram = true
+      iam   = true
     }
   }
 

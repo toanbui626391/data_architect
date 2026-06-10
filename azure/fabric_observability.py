@@ -14,7 +14,7 @@ from pyspark.sql.types import StructType, StructField, StringType, LongType, Tim
 def get_spark_session(
     app_name: str, 
     max_executors: int = 3, 
-    shuffle_partitions: int = 16
+    shuffle_partitions: int = 128
 ) -> SparkSession:
     """
     Initializes and configures a SparkSession with cost optimization, 
@@ -46,9 +46,16 @@ def get_spark_session(
         
         # 4. Compute Efficiency (Adaptive Query Execution & Shuffle Tuning)
         .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.initialPartitionNum", str(shuffle_partitions))
+        .config("spark.sql.adaptive.coalescePartitions.minPartitionNum", "1")
+        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "67108864") # 64MB target
+        .config("spark.sql.adaptive.skewJoin.enabled", "true")
+        .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
         .getOrCreate()
     )
+
 
 def log_metrics(
     spark: SparkSession,

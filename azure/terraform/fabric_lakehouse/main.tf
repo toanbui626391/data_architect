@@ -58,9 +58,9 @@ resource "fabric_spark_custom_pool" "streaming_pool" {
     max_node = 3
   }
 
-  # Disable dynamic executor allocation at the pool level
+  # Enable dynamic executor allocation at the pool level
   dynamic_executor_allocation {
-    enabled = false
+    enabled = true
   }
 }
 
@@ -85,7 +85,7 @@ resource "fabric_spark_environment_settings" "streaming_env_settings" {
   runtime_version = "1.2" # Adjust based on your Fabric default runtime version
 
   dynamic_executor_allocation = {
-    enabled       = false
+    enabled       = true
     max_executors = 3
     min_executors = 1
   }
@@ -98,6 +98,13 @@ resource "fabric_spark_environment_settings" "streaming_env_settings" {
   spark_properties = {
     "spark.sql.streaming.stateStore.providerClass"                       = "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider"
     "spark.sql.streaming.stateStore.rocksdb.changelogCheckpointing.enabled" = "true"
-    "spark.sql.shuffle.partitions"                                       = "12"
+    
+    # AQE configurations to prevent over/under-partitioning
+    "spark.sql.adaptive.enabled"                                         = "true"
+    "spark.sql.adaptive.coalescePartitions.enabled"                      = "true"
+    "spark.sql.adaptive.coalescePartitions.initialPartitionNum"          = "128"
+    "spark.sql.adaptive.coalescePartitions.minPartitionNum"              = "1"
+    "spark.sql.adaptive.advisoryPartitionSizeInBytes"                    = "67108864"
+    "spark.sql.shuffle.partitions"                                       = "128"
   }
 }

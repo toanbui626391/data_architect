@@ -74,17 +74,17 @@ flowchart TD
     EH -->|Native Connector| Eventstream
     DLQHub -.->|Count > 0| AzMonitor
 
-    %% Eventstream Forking
+    %% Eventstream → Hot Path ONLY (NOT Bronze — Spark owns Bronze write)
     Eventstream -->|Raw Events| Eventhouse
-    Eventstream -->|Append-Only + _ingested_at| Bronze
     Eventstream -->|Threshold Triggers| DataActivator
-    Eventstream -.->|Routing Error| BronzeDLQ
+
+    %% Spark Bronze Job reads DIRECTLY from Event Hubs Kafka endpoint
+    EH -->|Kafka Endpoint <br>&#40;SASL/TLS&#41;| BronzeJob
+    BronzeJob -.->|Missing order_id| BronzeDLQ
+    BronzeJob -->|Append-Only + Audit Cols| Bronze
 
     %% Medallion Processing via Spark
-    Bronze -->|readStream delta| BronzeJob
-    BronzeJob -.->|Missing order_id| BronzeDLQ
-    BronzeJob -->|foreachBatch MERGE| Silver
-    SilverJob -->|readStream delta| Silver
+    Bronze -->|readStream delta| SilverJob
     SilverJob -.->|DQ Failure| SilverDLQ
     SilverJob -->|Idempotent MERGE| Silver
     Silver -->|CDF readStream| GoldJob
@@ -130,20 +130,30 @@ flowchart TD
 
 ---
 
-## 3. Ingestion: Event Hubs → Fabric Eventstream
+## 3. Ingestion: Event Hubs → Two Parallel Paths
 
-**Fabric Eventstream** connects to Azure Event Hubs using its **native source connector**
-(no custom code, no Kafka consumer). All schema validation and DLQ routing at the broker
-level is handled by the Event Hubs Schema Registry (see
-[fabric_unified_realtime_ingestion_architecture.md](./fabric_unified_realtime_ingestion_architecture.md)).
+Data from Event Hubs flows into Fabric via **two parallel, non-overlapping paths**. This separation is intentional: the hot path prioritizes sub-second availability, while the cold path prioritizes schema control and auditability.
 
-### Eventstream Routing Rules
-| Destination | Route | Rule |
-| :--- | :--- | :--- |
-| **Bronze Lakehouse** | Append-Only | Zero Data Loss — no filtering at this stage |
-| **Eventhouse (KQL)** | Real-time fork | Hot path for operational KQL queries |
-| **Data Activator** | Threshold trigger | Real-time alerting on field values (e.g., fraud) |
-| **Bronze DLQ Table** | Routing failures | Any Eventstream parse error lands here |
+> [!IMPORTANT]
+> **Fabric Eventstream does NOT write to the Bronze Lakehouse.** The Spark Bronze Job is the sole writer to Bronze. Writing from both would cause duplicate records.
+
+### Path 1 — Hot Path: Eventstream → Eventhouse / Data Activator
+**Fabric Eventstream** connects to Event Hubs using its native source connector and routes events to real-time destinations only:
+
+| Destination | Purpose |
+| :--- | :--- |
+| **Eventhouse (KQL)** | Sub-second operational queries on live events |
+| **Data Activator** | Threshold-based real-time alerting (e.g., fraud, anomaly) |
+
+### Path 2 — Cold Path: Spark Bronze Job → Bronze Lakehouse
+**`fabric_bronze_sales.py`** reads directly from the Event Hubs Kafka endpoint (SASL/TLS) with full PySpark control:
+
+| Capability | Reason needed |
+| :--- | :--- |
+| `_rescued_data` schema rescue column | Handles unexpected new source fields without crashing the stream |
+| Custom audit columns (`_ingested_at`, `_ingested_date`) | Rule 08 §1.4 compliance |
+| Full DDL control (`CLUSTER BY`, `TBLPROPERTIES`) | Liquid Clustering + V-Order enforcement |
+| `kafka_offset`, `kafka_partition` metadata | Required by Silver for deduplication ordering |
 
 ---
 

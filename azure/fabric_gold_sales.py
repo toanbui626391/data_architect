@@ -6,127 +6,199 @@
 #
 # Target Table: Files/Tables/gold_daily_sales (Managed OneLake Table)
 # Orchestration: Scheduled via Data Factory Pipeline (e.g., every 15 mins)
+# Design Rules: .agents/rules/13_clean_code_principles.md
 # =============================================================================
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, current_timestamp
+import sys
+# Ensure Python can load modules from current workspace directory
+sys.path.append(".")
 
-# Initialize Spark Session with Batch/Incremental Profile
-spark = (
-    SparkSession.builder.appName("fabric_gold_sales")
-    # 1. Flexible Cost Control
-    .config("spark.dynamicAllocation.enabled", "true")
-    .config("spark.dynamicAllocation.minExecutors", "1")
-    .config("spark.dynamicAllocation.maxExecutors", "4")
-    
-    # 2. State Optimization (Required for CDF streaming state)
-    .config("spark.sql.streaming.stateStore.providerClass", 
-            "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider")
-    .config("spark.sql.streaming.stateStore.rocksdb.changelogCheckpointing.enabled", "true")
-    
-    # 3. Small File Management (Fabric V-Order)
-    .config("spark.sql.parquet.vorder.enabled", "true")
-    .config("spark.microsoft.delta.optimizeWrite.enabled", "true")
-    
-    # 4. Compute Efficiency (AQE)
-    .config("spark.sql.adaptive.enabled", "true")
-    .config("spark.sql.shuffle.partitions", "16")
-    .getOrCreate()
-)
+from pyspark.sql import SparkSession, DataFrame
+from fabric_observability import get_spark_session, log_metrics
 
 # -----------------------------------------------------------------------------
-# 1. Ensure Target Table Exists (DDL)
+# CONSTANTS & CONFIGURATION
 # -----------------------------------------------------------------------------
-spark.sql("""
-  CREATE TABLE IF NOT EXISTS gold_daily_sales (
-    order_date DATE,
-    store_id STRING,
-    total_revenue DOUBLE,
-    total_orders BIGINT,
-    _gold_updated_at TIMESTAMP
-  )
-  USING DELTA
-  TBLPROPERTIES (
-    "quality" = "gold",
-    "delta.enableChangeDataFeed" = "true",
-    "delta.autoOptimize.optimizeWrite" = "true"
-  )
-  CLUSTER BY (order_date)
-""")
+SOURCE_TABLE = "silver_sales_orders"
+TARGET_TABLE = "gold_daily_sales"
+CHECKPOINT_PATH = "Files/checkpoints/gold_daily_sales"
 
 # -----------------------------------------------------------------------------
-# 2. Read Incremental Changes from Silver (CDF)
+# MODULAR FUNCTIONS
 # -----------------------------------------------------------------------------
-# We read from Silver as a stream to keep track of processed offsets, 
-# but we will use Trigger.AvailableNow to run it as a scheduled batch.
-silver_cdf_stream = (
-    spark.readStream
-    .format("delta")
-    .option("readChangeFeed", "true")
-    .option("startingVersion", 0) # Ignored if checkpoint exists
-    .table("silver_sales_orders")
-)
 
-# -----------------------------------------------------------------------------
-# 3. Process Changes (foreachBatch + MERGE)
-# -----------------------------------------------------------------------------
-def merge_into_gold(batch_df, batch_id):
-    # Register the micro-batch as a temporary view
-    batch_df.createOrReplaceTempView("silver_changes")
-    
-    # Perform incremental aggregation by calculating net changes from CDF:
-    # - insert / update_postimage: positive contribution (+total_amount, +1 order)
-    # - delete / update_preimage: negative contribution (-total_amount, -1 order)
-    spark.sql("""
-        MERGE INTO gold_daily_sales AS target
-        USING (
-            SELECT
-                order_date,
-                store_id,
-                SUM(
-                    CASE 
-                        WHEN _change_type IN ('insert', 'update_postimage') THEN total_amount
-                        WHEN _change_type IN ('delete', 'update_preimage') THEN -total_amount
-                        ELSE 0
-                    END
-                ) AS net_revenue,
-                SUM(
-                    CASE 
-                        WHEN _change_type IN ('insert', 'update_postimage') THEN 1
-                        WHEN _change_type IN ('delete', 'update_preimage') THEN -1
-                        ELSE 0
-                    END
-                ) AS net_orders,
-                current_timestamp() AS _gold_updated_at
-            FROM silver_changes
-            GROUP BY order_date, store_id
-        ) AS source
-        ON  target.order_date = source.order_date
-        AND target.store_id   = source.store_id
-        WHEN MATCHED THEN 
-            UPDATE SET 
-                target.total_revenue = target.total_revenue + source.net_revenue,
-                target.total_orders  = target.total_orders + source.net_orders,
-                target._gold_updated_at = source._gold_updated_at
-        WHEN NOT MATCHED THEN 
-            INSERT (order_date, store_id, total_revenue, total_orders, _gold_updated_at)
-            VALUES (source.order_date, source.store_id, source.net_revenue, source.net_orders, source._gold_updated_at)
+def create_gold_table(spark: SparkSession) -> None:
+    """
+    Pre-creates target Gold Aggregation table if not exists.
+
+    Parameters:
+        spark (SparkSession): Current active SparkSession.
+    """
+    spark.sql(f"""
+      CREATE TABLE IF NOT EXISTS {TARGET_TABLE} (
+        order_date DATE,
+        store_id STRING,
+        total_revenue DOUBLE,
+        total_orders BIGINT,
+        _gold_updated_at TIMESTAMP
+      )
+      USING DELTA
+      TBLPROPERTIES (
+        "quality" = "gold",
+        "delta.enableChangeDataFeed" = "true",
+        "delta.autoOptimize.optimizeWrite" = "true"
+      )
+      CLUSTER BY (order_date)
     """)
 
-# -----------------------------------------------------------------------------
-# 4. Execute the Incremental Batch
-# -----------------------------------------------------------------------------
-checkpoint_path = "Files/checkpoints/gold_daily_sales"
+def read_silver_cdf_stream(spark: SparkSession) -> DataFrame:
+    """
+    Reads incremental changes from the Silver table using Delta Change Data Feed.
 
-query = (
-    silver_cdf_stream.writeStream
-    .foreachBatch(merge_into_gold)
-    .option("checkpointLocation", checkpoint_path)
-    # AvailableNow acts as a one-time batch execution. 
-    # It processes all new data since the last run and then gracefully shuts down.
-    .trigger(availableNow=True)
-    .start()
-)
+    Parameters:
+        spark (SparkSession): Current active SparkSession.
 
-# Block until the batch finishes processing
-query.awaitTermination()
+    Returns:
+        DataFrame: Stream DataFrame reading from Silver CDF.
+    """
+    return (
+        spark.readStream
+        .format("delta")
+        .option("readChangeFeed", "true")
+        .option("startingVersion", 0) # Ignored if checkpoint exists
+        .table(SOURCE_TABLE)
+    )
+
+def merge_into_gold(batch_df: DataFrame, batch_id: int) -> None:
+    """
+    Performs incremental running aggregation: calculates net changes from CDF 
+    (positive for inserts/post-images, negative for deletes/pre-images) 
+    and applies a MERGE into the Gold daily aggregation table.
+
+    Parameters:
+        batch_df (DataFrame): Incoming batch DataFrame from Silver CDF.
+        batch_id (int): Incremental micro-batch run ID.
+    """
+    import time
+    start_time = time.time()
+    
+    # Gold batch job runs on Workspace Starter Pool Small cluster (1 driver + 1 executor = 4 CUs)
+    allocated_cus = 4.0
+    
+    try:
+        input_rows = batch_df.count()
+        if input_rows == 0:
+            return
+            
+        # Register the micro-batch as a temporary view
+        batch_df.createOrReplaceTempView("silver_changes")
+        
+        # Perform incremental aggregation by calculating net changes from CDF:
+        # - insert / update_postimage: positive contribution (+total_amount, +1 order)
+        # - delete / update_preimage: negative contribution (-total_amount, -1 order)
+        spark = batch_df.sparkSession
+        spark.sql(f"""
+            MERGE INTO {TARGET_TABLE} AS target
+            USING (
+                SELECT
+                    order_date,
+                    store_id,
+                    SUM(
+                        CASE 
+                            WHEN _change_type IN ('insert', 'update_postimage') THEN total_amount
+                            WHEN _change_type IN ('delete', 'update_preimage') THEN -total_amount
+                            ELSE 0
+                        END
+                    ) AS net_revenue,
+                    SUM(
+                        CASE 
+                            WHEN _change_type IN ('insert', 'update_postimage') THEN 1
+                            WHEN _change_type IN ('delete', 'update_preimage') THEN -1
+                            ELSE 0
+                        END
+                    ) AS net_orders,
+                    current_timestamp() AS _gold_updated_at
+                FROM silver_changes
+                GROUP BY order_date, store_id
+            ) AS source
+            ON  target.order_date = source.order_date
+            AND target.store_id   = source.store_id
+            WHEN MATCHED THEN 
+                UPDATE SET 
+                    target.total_revenue = target.total_revenue + source.net_revenue,
+                    target.total_orders  = target.total_orders + source.net_orders,
+                    target._gold_updated_at = source._gold_updated_at
+            WHEN NOT MATCHED THEN 
+                INSERT (order_date, store_id, total_revenue, total_orders, _gold_updated_at)
+                VALUES (source.order_date, source.store_id, source.net_revenue, source.net_orders, source._gold_updated_at)
+        """)
+        
+        inserted_rows = 0
+        updated_rows = 0
+        deleted_rows = 0
+        
+        # Retrieve merge metrics from target table history
+        try:
+            history_df = spark.sql(f"DESCRIBE HISTORY {TARGET_TABLE} LIMIT 1")
+            metrics = history_df.select("operationMetrics").collect()[0]["operationMetrics"]
+            inserted_rows = int(metrics.get("numTargetRowsInserted", 0))
+            updated_rows = int(metrics.get("numTargetRowsUpdated", 0))
+            deleted_rows = int(metrics.get("numTargetRowsDeleted", 0))
+        except Exception as history_err:
+            print(f"Warning: Failed to fetch merge metrics: {str(history_err)}")
+            
+        duration_ms = int((time.time() - start_time) * 1000)
+        
+        log_metrics(
+            spark=spark,
+            job_name="sjd_gold_sales_aggregation",
+            batch_id=batch_id,
+            input_rows=input_rows,
+            inserted_rows=inserted_rows,
+            updated_rows=updated_rows,
+            deleted_rows=deleted_rows,
+            duration_ms=duration_ms,
+            status="Succeeded",
+            allocated_cus=allocated_cus
+        )
+    except Exception as err:
+        duration_ms = int((time.time() - start_time) * 1000)
+        log_metrics(
+            spark=batch_df.sparkSession,
+            job_name="sjd_gold_sales_aggregation",
+            batch_id=batch_id,
+            input_rows=batch_df.count(),
+            inserted_rows=0,
+            updated_rows=0,
+            deleted_rows=0,
+            duration_ms=duration_ms,
+            status="Failed",
+            allocated_cus=allocated_cus,
+            error_message=str(err)
+        )
+        raise err
+
+# -----------------------------------------------------------------------------
+# MAIN EXECUTION ENTRYPOINT
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    # Initialize session from shared utility (max executors 4 for Gold batch)
+    spark_session = get_spark_session("fabric_gold_sales", max_executors=4)
+    
+    # Establish conformed target DDL
+    create_gold_table(spark_session)
+    
+    # Run structured stream using modular pipeline steps
+    silver_cdf_stream = read_silver_cdf_stream(spark_session)
+    
+    query = (
+        silver_cdf_stream.writeStream
+        .foreachBatch(merge_into_gold)
+        .option("checkpointLocation", CHECKPOINT_PATH)
+        # AvailableNow trigger runs the stream as an incremental scheduled batch
+        .trigger(availableNow=True)
+        .start()
+    )
+    
+    # Block execution until the batch completes
+    query.awaitTermination()

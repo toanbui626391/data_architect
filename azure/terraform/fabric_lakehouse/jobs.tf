@@ -63,6 +63,9 @@ resource "fabric_spark_job_definition" "bronze_sales" {
     "Main/fabric_bronze_sales.py" = {
       source = "${path.module}/../../fabric_bronze_sales.py"
     }
+    "Main/fabric_observability.py" = {
+      source = "${path.module}/../../fabric_observability.py"
+    }
   }
 }
 
@@ -77,6 +80,9 @@ resource "fabric_spark_job_definition" "silver_sales" {
     }
     "Main/fabric_silver_sales.py" = {
       source = "${path.module}/../../fabric_silver_sales.py"
+    }
+    "Main/fabric_observability.py" = {
+      source = "${path.module}/../../fabric_observability.py"
     }
   }
 }
@@ -93,5 +99,9 @@ resource "fabric_spark_job_definition" "gold_sales" {
     "Main/fabric_gold_sales.py" = {
       source = "${path.module}/../../fabric_gold_sales.py"
     }
+    "Main/fabric_observability.py" = {
+      source = "${path.module}/../../fabric_observability.py"
+    }
   }
 }
+

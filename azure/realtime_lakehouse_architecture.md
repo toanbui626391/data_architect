@@ -358,3 +358,66 @@ All Fabric Spark writes automatically apply **V-Order** optimization — sorting
 | **Fabric Capacity Metrics App** | CU consumption per workspace — prevents throttling |
 | **Azure Monitor / Log Analytics** | Central telemetry sink, alert rules, audit trail for SIEM |
 | **Microsoft Purview** | End-to-end data lineage from Event Hubs → Bronze → Silver → Gold → Power BI |
+
+---
+
+## 10. Scheduling & Orchestration
+
+Microsoft Fabric orchestrates workloads using **Fabric Data Factory Pipelines** (the equivalent to Databricks Workflows) and **Spark Job Definitions**. Because this architecture relies heavily on real-time streaming, the scheduling strategy is split into two modes: **Continuous** and **Scheduled (Batch)**.
+
+### 10.1 Streaming Jobs (Continuous)
+
+**Bronze** and **Silver** ingestion layers are continuous, long-running processes. They are NOT scheduled to run at specific intervals.
+
+*   **Mechanism:** Fabric Spark Job Definition configured with `Retry policy = Infinite` and running in a dedicated Spark session.
+*   **Behavior:** The job is manually started once. It runs indefinitely, continuously polling Event Hubs (Bronze) or the Delta Change Data Feed (Silver) for new micro-batches.
+*   **Resilience:** If the Spark node crashes, Fabric automatically restarts the job. The Spark Structured Streaming checkpoint ensures it resumes from the exact last offset without data loss or duplication.
+
+### 10.2 Scheduled Jobs (Batch / Pipeline)
+
+The **Gold** aggregation layer and maintenance tasks are orchestrated using **Fabric Data Factory Pipelines** on a standard cron schedule.
+
+*   **Mechanism:** A Fabric Pipeline with a `Schedule` trigger executing a Fabric Notebook activity.
+*   **Gold Aggregation:** Runs every 15 minutes. It reads the Silver Change Data Feed to incrementally update the Gold star schema.
+*   **Data Quality Reporting:** Runs daily. Executes a Great Expectations suite against the Silver/Gold tables to generate a data quality scorecard.
+*   **Table Maintenance:** Runs weekly. Executes `OPTIMIZE` (V-Order compaction) and `VACUUM` (stale file cleanup) on all Delta tables.
+
+### 10.3 Orchestration Summary Table
+
+| Pipeline Layer | Orchestration Mechanism | Trigger / Schedule | Compute Mode |
+| :--- | :--- | :--- | :--- |
+| **Bronze Ingestion** | Spark Job Definition | Continuous (Always On) | Serverless Autoscale (0.5 CU/hr) |
+| **Silver Processing** | Spark Job Definition | Continuous (Always On) | Serverless Autoscale (0.5 CU/hr) |
+| **Gold Aggregation** | Data Factory Pipeline | Scheduled (e.g., */15 * * * *) | Shared Capacity Pool |
+| **DQ Validation** | Data Factory Pipeline | Scheduled (e.g., Daily at 02:00) | Shared Capacity Pool |
+| **Table Maintenance** | Data Factory Pipeline | Scheduled (e.g., Weekly Sunday) | Shared Capacity Pool |
+
+---
+
+## 11. Cost Optimization Strategy
+
+This architecture has been specifically designed to minimize **Capacity Unit (CU)** consumption in Microsoft Fabric, achieving near real-time latency while keeping monthly costs dramatically lower than default configurations.
+
+### 11.1 Elimination of Fabric Eventstream
+*   **The Saving:** ~$150 – $300 per month.
+*   **How:** By natively connecting the Fabric Spark Bronze job directly to the Azure Event Hubs Kafka endpoint (port 9093), we bypass the need for Fabric Eventstream. Eventstream charges continuously for an active stream (0.222 CU/hr) plus data traffic and processor compute. Removing it eliminates this entire billing layer without sacrificing any ingestion capability.
+
+### 11.2 Serverless Autoscale Billing for Streaming
+*   **The Saving:** Prevents expensive F-SKU capacity upgrades.
+*   **How:** Spark Streaming jobs (Bronze and Silver) run 24/7. If they ran on the shared capacity pool, they would constantly drain CUs, potentially throttling BI users. By opting the streaming jobs into **Autoscale Billing**, they run on dedicated, serverless nodes billed at a flat **0.5 CU/hr** (~$65/month per job), protecting the main capacity pool.
+
+### 11.3 Micro-Batching the Gold Layer
+*   **The Saving:** ~$65 per month (compared to streaming).
+*   **How:** Instead of running the Gold aggregation as a 24/7 streaming job, it is orchestrated via a Data Factory Pipeline on a **15-minute cron schedule**. This means it only consumes shared capacity for a few seconds, 4 times an hour, rather than burning 0.5 CU/hr continuously.
+
+### 11.4 Delta Change Data Feed (CDF) for Incremental Reads
+*   **The Saving:** Massive reduction in query compute time and OneLake read operations.
+*   **How:** Because CDF is enabled on the Silver tables, the 15-minute Gold aggregation job does not perform a full table scan. It only reads the specific rows (`_change_type IN ('insert', 'update_postimage')`) that arrived in the last 15 minutes. This keeps the Gold processing time to under 10 seconds per run.
+
+### 11.5 Liquid Clustering vs. Partitioning
+*   **The Saving:** Reduced compute overhead during queries and maintenance.
+*   **How:** Traditional `PARTITIONED BY` creates thousands of small files (especially for continuous streaming), forcing Spark to spend heavy compute overhead managing file metadata. **Liquid Clustering** groups data dynamically, preventing the small file problem, optimizing V-Order compression, and making `OPTIMIZE` maintenance operations significantly cheaper and faster.
+
+### 11.6 Reserved Capacity (F-SKU)
+*   **The Saving:** ~41% discount on baseline compute.
+*   **How:** For the shared capacity pool used by Power BI, SQL Endpoints, and scheduled pipelines, committing to a **1-year or 3-year Microsoft Fabric Capacity Reservation** reduces the baseline $0.18/CU/hour pay-as-you-go rate by over 40%.

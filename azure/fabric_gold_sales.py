@@ -74,31 +74,43 @@ def merge_into_gold(batch_df, batch_id):
     # Register the micro-batch as a temporary view
     batch_df.createOrReplaceTempView("silver_changes")
     
-    # Perform the aggregation and MERGE directly in Spark SQL
-    # We only process 'insert' and 'update_postimage' from the CDF
+    # Perform incremental aggregation by calculating net changes from CDF:
+    # - insert / update_postimage: positive contribution (+total_amount, +1 order)
+    # - delete / update_preimage: negative contribution (-total_amount, -1 order)
     spark.sql("""
         MERGE INTO gold_daily_sales AS target
         USING (
             SELECT
-                CAST(updated_at AS DATE) AS order_date,
+                order_date,
                 store_id,
-                SUM(total_amount)        AS total_revenue,
-                COUNT(DISTINCT order_id) AS total_orders,
-                current_timestamp()      AS _gold_updated_at
+                SUM(
+                    CASE 
+                        WHEN _change_type IN ('insert', 'update_postimage') THEN total_amount
+                        WHEN _change_type IN ('delete', 'update_preimage') THEN -total_amount
+                        ELSE 0
+                    END
+                ) AS net_revenue,
+                SUM(
+                    CASE 
+                        WHEN _change_type IN ('insert', 'update_postimage') THEN 1
+                        WHEN _change_type IN ('delete', 'update_preimage') THEN -1
+                        ELSE 0
+                    END
+                ) AS net_orders,
+                current_timestamp() AS _gold_updated_at
             FROM silver_changes
-            WHERE _change_type IN ('insert', 'update_postimage')
-            GROUP BY CAST(updated_at AS DATE), store_id
+            GROUP BY order_date, store_id
         ) AS source
         ON  target.order_date = source.order_date
         AND target.store_id   = source.store_id
         WHEN MATCHED THEN 
             UPDATE SET 
-                target.total_revenue = target.total_revenue + source.total_revenue,
-                target.total_orders  = target.total_orders + source.total_orders,
+                target.total_revenue = target.total_revenue + source.net_revenue,
+                target.total_orders  = target.total_orders + source.net_orders,
                 target._gold_updated_at = source._gold_updated_at
         WHEN NOT MATCHED THEN 
             INSERT (order_date, store_id, total_revenue, total_orders, _gold_updated_at)
-            VALUES (source.order_date, source.store_id, source.total_revenue, source.total_orders, source._gold_updated_at)
+            VALUES (source.order_date, source.store_id, source.net_revenue, source.net_orders, source._gold_updated_at)
     """)
 
 # -----------------------------------------------------------------------------

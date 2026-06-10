@@ -1,0 +1,44 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - azure/*.py
+      - azure/terraform/fabric_lakehouse/**
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # The Fabric Capacity ID variable is securely stored in a Variable Group or pipeline variables
+  CAPACITY_ID: $(FabricCapacityId)
+
+stages:
+  - stage: DeployInfrastructureAndCode
+    displayName: 'Deploy Fabric Infra and Spark Jobs'
+    jobs:
+      - job: TerraformApply
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+
+          # Log in using Azure CLI Service Connection to authenticate the Terraform Fabric provider
+          - task: AzureCLI@2
+            displayName: 'Run Terraform Apply'
+            inputs:
+              azureSubscription: 'Your-Azure-Service-Connection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/azure/terraform/fabric_lakehouse'
+              inlineScript: |
+                # The microsoft/fabric provider natively uses the Azure CLI active session
+                # authenticated via the ADO Service Connection.
+                
+                echo "1. Initializing Terraform..."
+                terraform init
+
+                echo "2. Applying Terraform configuration..."
+                terraform apply -auto-approve -var="capacity_id=$CAPACITY_ID"

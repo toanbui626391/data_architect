@@ -57,6 +57,7 @@ flowchart TD
             Lakehouse[("OneLake / Lakehouse <br>&#40;Bronze Layer&#41;")]
             DataActivator["Data Activator <br>&#40;Real-Time Alerts&#41;"]
             FabricSpark["Fabric Spark <br>&#40;Structured Streaming&#41;"]
+            DLQ[("DLQ Table <br>&#40;Unparseable&#41;")]
         end
     end
 
@@ -90,14 +91,17 @@ flowchart TD
     
     %% Routing in Fabric
     Eventstream --> Eventhouse
-    Eventstream --> Lakehouse
+    Eventstream -->|Append-Only| Lakehouse
     Eventstream --> DataActivator
     Eventstream --> FabricSpark
+    Eventstream -.->|Validation Error| DLQ
 
     %% Monitoring Flow
     ACA -.->|Task FAILED| AzureMonitor
     APIM -.->|4XX/5XX Errors| AzureMonitor
-    Eventstream -.->|Data Dropped / Lag| AzureMonitor
+    Eventstream -.->|Throughput Drop = 0| AzureMonitor
+    FabricSpark -.->|Consumer Lag > 5m| AzureMonitor
+    DLQ -.->|Count > 0| AzureMonitor
     
     AzureMonitor -->|Alert Triggered| Notification
 
@@ -109,9 +113,11 @@ flowchart TD
     classDef edge fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     classDef alert fill:#ffe6cc,stroke:#d79b00,stroke-width:1px,color:#000;
     classDef fabric fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000;
+    classDef bad fill:#f8cecc,stroke:#b85450,stroke-width:1px,color:#000;
     
     class SAPHana,Eventhouse,Lakehouse storage;
     class Salesforce,ACA,APIM,KeyVault,FabricSpark process;
+    class DLQ bad;
     class AppGateway edge;
     class AzureMonitor monitor;
     class AzureEdge,InternalEnv,SaaSEnv,Networking,ControlPlane network;
@@ -155,13 +161,15 @@ Validation is handled at the network edge inside **Azure API Management (APIM)**
 
 ## 5. Fabric Eventstream Transformations & Routing
 
-Once data arrives in **Fabric Eventstream**, we utilize its no-code/low-code transformation capabilities before routing to destinations:
-1.  **Filtering & Enrichment:** Remove PII or unused fields in real-time.
-2.  **Routing:**
-    *   **Lakehouse (Bronze Layer):** Appends raw events into Delta tables in OneLake.
+Once data arrives in **Fabric Eventstream**, we utilize its routing capabilities while strictly adhering to real-time processing rules:
+
+1.  **Zero Data Loss (Bronze Layer Rule):** Eventstream does *not* filter business anomalies or drop bad payloads for the Lakehouse route. To maintain auditability, it captures everything in an append-only stream. Any PII masking or logical filtering is deferred to the Medallion Silver layer.
+2.  **Routing & Forking:**
+    *   **Lakehouse (Bronze Layer):** Appends raw events into Delta tables in OneLake (Append-Only, Zero Data Loss).
     *   **Eventhouse:** High-throughput time-series storage for operational reporting (KQL).
     *   **Data Activator:** Triggers immediate alerts (e.g., fraudulent transaction detected).
-    *   **Fabric Spark:** For complex, stateful deduplication (Silver Layer).
+    *   **Fabric Spark:** Real-time pipelines run in continuous streaming mode to process Silver layer data, performing idempotent deduplication (e.g., `MERGE` via `foreachBatch`).
+    *   **Dead Letter Queue (DLQ):** Unparseable payloads or events failing strict schema validation are routed immediately to a dedicated DLQ Lakehouse table (e.g., `raw.sales_orders_dlq`). Eventstream is configured with `errors.tolerance = all` to ensure structural anomalies never halt ingestion.
 
 ---
 
@@ -171,13 +179,26 @@ Observability spans both Azure (Edge/Compute) and Microsoft Fabric (Ingestion/St
 
 ### Key Metrics Monitored
 1.  **Connector Health:** Triggers if an ACA task crashes or restarts (Azure Monitor).
-2.  **Eventstream Ingestion Drop:** Triggers if incoming message volume to Eventstream drops abruptly (Fabric Metrics).
-3.  **Spark Processing Lag:** Triggers if downstream Fabric Spark Structured Streaming offset lag grows beyond SLAs.
+2.  **Throughput Drop:** Triggers if incoming message volume (`messages/sec`) to Eventstream drops abruptly to zero during business hours (Fabric Metrics).
+3.  **Spark Processing Lag:** Triggers if downstream Fabric Spark Structured Streaming consumer lag grows continuously for more than 5 minutes.
+4.  **DLQ Message Count:** Triggers if any unparseable message lands in the DLQ Lakehouse table (Count > 0).
 
 ### Alert Routing Matrix
 | Alert Condition | Metric / Source | Severity | SLA Response |
 | :--- | :--- | :--- | :--- |
-| **Connector FAILED** | Container App Task State | **P1** | Immediate Response |
-| **Ingestion Drop** | Fabric Eventstream `IncomingMessages` = 0 | **P2** | Check Source Status |
-| **Consumer Lag Growing** | Fabric Spark Offset Lag > 5m | **P2** | Check Fabric Capacity |
+| **Connector FAILED** | Container App Task State | **P1** | Platform Engineering |
+| **DLQ Message Received** | Eventstream DLQ Output Count > 0 | **P1** | Platform Engineering |
+| **Consumer Lag Growing** | Fabric Spark Offset Lag > 5m | **P2** | Data Engineering |
+| **Throughput Drop** | Fabric Eventstream `IncomingMessages` = 0 | **P2** | Data Engineering |
 | **APIM 5XX Errors** | API Management `FailedRequests` | **P2** | Investigate Webhooks |
+
+---
+
+## 7. Operational Best Practices (Message Bus Standards)
+
+To ensure the ingestion layer operates as a reliable enterprise backbone, the following standards are enforced:
+
+*   **Infrastructure as Code (IaC):** All Fabric Eventstreams, ACA Kafka Connect workers, and schema definitions MUST be provisioned using **Terraform** or Databricks/Fabric Asset Bundles. Manual creation in the UI is strictly forbidden.
+*   **Retention Policy:** Fabric Eventstream retention MUST be set to a minimum of **7 days** to allow pipeline replay and incident recovery without data loss.
+*   **Consumer Group Isolation:** Each Fabric Spark pipeline consuming from the Eventstream or Bronze layer MUST use a **unique consumer group ID**. Never share a consumer group across different pipelines.
+*   **Topic Naming & Partitioning:** Eventstream custom app sources MUST follow the pattern `{source}.{entity}.{version}` (e.g., `crm.sales_orders.v1`) and be partitioned by the primary entity key (e.g., `order_id`) to guarantee ordered delivery.

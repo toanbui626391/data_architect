@@ -4,8 +4,8 @@
 
 This document defines the Enterprise **Real-Time Lakehouse Architecture** on
 Microsoft Azure using **Microsoft Fabric**. It provides an end-to-end design
-starting from source data ingestion through a centralized message bus into a
-Fabric-managed OneLake Lakehouse using Fabric Eventstream and Fabric Spark.
+starting from source data ingestion directly into Microsoft Fabric using 
+Fabric Eventstream (Real-Time Intelligence) and Fabric Spark.
 
 The architecture unites real-time message brokering with database and SaaS data
 polling, webhooks, structured streaming pipelines, and serverless SQL query
@@ -16,9 +16,8 @@ workspace-level RBAC, private network routing, and unified observability.
 
 ## 2. End-to-End Architecture Diagram
 
-The diagram below details the ingestion paths through the Centralized Message
-Bus (Azure Event Hubs) into the Medallion layers inside Microsoft Fabric
-OneLake.
+The diagram below details the ingestion paths through Fabric Eventstream
+into the Medallion layers inside Microsoft Fabric OneLake.
 
 ```mermaid
 flowchart TD
@@ -30,23 +29,21 @@ flowchart TD
     end
 
     %% Network & Edge
-    subgraph EdgeNetworking [Network Routing & Security]
+    subgraph EdgeNetworking [Network Routing & Edge]
         ExpressRoute["Azure ExpressRoute / VPN"]
         NAT["NAT Gateway"]
         APIM["Azure APIM + App Gateway"]
-        StoreQueue[("Storage Queue <br>&#40;Buffer&#41;")]
-        Function["Azure Function <br>&#40;Queue to Event Hub&#41;"]
+        ACA["Kafka Connect on ACA <br>&#40;Pull Edge&#41;"]
     end
 
-    %% Centralized Message Bus
-    subgraph MessageBus [Azure Centralized Message Bus]
-        EventHubs["Azure Event Hubs <br>&#40;Kafka-Compatible&#41;"]
-        SchemaReg[("Schema Registry <br>&#40;Avro Validation&#41;")]
-        DLQ[("Dead Letter Hubs <br>&#40;*.dlq&#41;")]
-    end
-
-    %% Microsoft Fabric Lakehouse
-    subgraph FabricLakehouse [Microsoft Fabric Lakehouse]
+    %% Microsoft Fabric
+    subgraph FabricLakehouse [Microsoft Fabric]
+        subgraph RealTime [Real-Time Intelligence]
+            Eventstream["Fabric Eventstream <br>&#40;Central Ingestion&#41;"]
+            Eventhouse[("Eventhouse <br>&#40;KQL Database&#41;")]
+            DataActivator["Data Activator <br>&#40;Alerts&#41;"]
+        end
+        
         subgraph OneLake [OneLake Unified Storage]
             Bronze[("Bronze Delta Table <br>&#40;Raw Ingestion&#41;")]
             Silver[("Silver Delta Table <br>&#40;Cleansed & Dedupped&#41;")]
@@ -54,7 +51,6 @@ flowchart TD
         end
         
         subgraph Compute [Fabric Compute Engines]
-            Eventstream["Fabric Eventstream <br>&#40;No-Code Ingestion&#41;"]
             Spark["Fabric Spark Streaming <br>&#40;Notebooks / Jobs&#41;"]
             SQLEndpoint["Fabric SQL Endpoint <br>&#40;Serverless T-SQL&#41;"]
         end
@@ -76,18 +72,17 @@ flowchart TD
     end
 
     %% Data Flow Routing
-    SAP -->|ExpressRoute| EventHubs
-    SF -->|NAT Gateway| EventHubs
+    SAP -->|ExpressRoute| ACA
+    SF -->|NAT Gateway| ACA
     Webhooks --> APIM
-    APIM --> StoreQueue
-    StoreQueue --> Function
-    Function --> EventHubs
 
-    EventHubs --> SchemaReg
-    EventHubs -.->|Failures| DLQ
+    ACA -->|Kafka Endpoint| Eventstream
+    APIM -->|HTTP Endpoint| Eventstream
 
-    EventHubs --> Eventstream
+    %% Routing inside Fabric Eventstream
+    Eventstream -->|Raw Events| Eventhouse
     Eventstream -->|Append-Only| Bronze
+    Eventstream -->|Triggers| DataActivator
     
     %% Medallion Flows via Spark
     Bronze -->|Spark ReadStream| Spark
@@ -100,13 +95,13 @@ flowchart TD
     SQLEndpoint --> BI["Power BI Direct Lake Mode"]
 
     %% Security & Governance
+    KeyVault -.->|Injects Secrets| ACA
     KeyVault -.->|CMEK| OneLake
     Workspace -.->|Secures| OneLake
     Purview -.->|Scan Metadata| OneLake
 
     %% Telemetry Paths
-    EventHubs -.->|Consumer Lag| AzMonitor
-    DLQ -.->|DLQ Message Count| AzMonitor
+    Eventstream -.->|Ingestion Metrics| AzMonitor
     Spark -.->|Job Status / Failures| MonitorHub
     MonitorHub -.-> AzMonitor
     CapacityApp -.->|CU Throttling Alerts| AzMonitor
@@ -116,41 +111,33 @@ flowchart TD
     %% Styling
     classDef storage fill:#e2f0d9,stroke:#385723,color:#000;
     classDef process fill:#dae8fc,stroke:#6c8ebf,color:#000;
-    classDef bad fill:#f8cecc,stroke:#b85450,color:#000;
     classDef monitor fill:#fff2cc,stroke:#d6b656,color:#000;
     classDef security fill:#e1d5e7,stroke:#9673a6,color:#000;
 
-    class Bronze,Silver,Gold,StoreQueue,EventHubs storage;
-    class SAP,SF,Webhooks,APIM,Function process;
-    class Eventstream,Spark,SQLEndpoint process;
-    class DLQ bad;
+    class Bronze,Silver,Gold,Eventhouse storage;
+    class SAP,SF,Webhooks,APIM,ACA process;
+    class Eventstream,Spark,SQLEndpoint,DataActivator process;
     class AzMonitor,CapacityApp,MonitorHub,LogicApp monitor;
     class Workspace,KeyVault,Purview security;
 ```
 
 ---
 
-## 3. Ingestion & Message Bus Integration
+## 3. Ingestion Integration via Fabric Eventstream
 
-To prevent pipeline failures, ingestion is decoupled from processing using a
-**Centralized Message Bus** standard:
+To consolidate infrastructure and leverage native capabilities, all real-time ingestion is unified through **Fabric Eventstream**:
 
 1.  **Ingestion Computes (Pull-Based):**
     *   **Kafka Connect on Azure Container Apps (ACA)** executes JDBC and PubSub
         CDC connectors pulling from SAP HANA and Salesforce.
-    *   Credentials are in Azure Key Vault, injected dynamically at runtime via
-        Managed Identities.
+    *   Instead of standalone message buses, ACA connects directly to the Eventstream's standard Kafka Protocol Custom App Endpoint.
 2.  **Push-Based Webhooks:**
     *   Ingests events securely via **Azure API Management (APIM)** + **App
         Gateway (WAF)**.
-    *   APIM buffers raw payloads in an **Azure Storage Queue** to handle surges,
-        which are then pushed to Event Hubs by an **Azure Function**.
-3.  **Fabric Ingestion (Fabric Eventstream):**
-    *   Fabric Eventstream connects directly to Azure Event Hubs as a source.
-    *   Eventstream routes incoming events to the Lakehouse **Bronze Delta**
-        table in a no-code ingestion configuration.
-    *   Avro schema validation is enforced using the Event Hubs Schema Registry,
-        routing serialization anomalies immediately to Dead Letter Hubs (`*.dlq`).
+    *   APIM pushes validated payloads directly into Eventstream's HTTP Custom App endpoint, removing the need for Azure Storage Queues and Azure Functions.
+3.  **Fabric Eventstream Transformations:**
+    *   Fabric Eventstream acts as the central router. Before data lands, Eventstream's no-code processor can filter anomalies, drop PII, and duplicate streams.
+    *   Eventstream routes incoming events simultaneously to the Lakehouse **Bronze Delta** table (for Medallion processing), **Eventhouse** (for KQL ad-hoc queries), and **Data Activator** (for real-time alerting).
 
 ---
 
@@ -160,7 +147,7 @@ Data is processed incrementally in **Microsoft Fabric** using **Fabric Spark**
 (PySpark & Spark SQL structured streaming jobs):
 
 ### 4.1 Bronze Layer (Raw Storage)
-The Bronze layer is an append-only archive of raw Event Hubs message payloads.
+The Bronze layer is an append-only archive of raw message payloads driven directly by Eventstream.
 *   **Table Type:** Delta Table (OneLake)
 *   **Schema Policy:** Evolution is enabled to capture columns dynamically
     in a `_rescued_data_` column without failing the ingestion stream.
@@ -272,10 +259,10 @@ SaaS governance boundaries are maintained via native Microsoft Fabric systems:
     linked logically using shortcuts, avoiding data movement.
 *   **Network Routing:** Connections utilize **Fabric Capacity Private Endpoints**
     to secure ingress and egress traffic.
-*   **Managed Identities:** Ingestion connections (ACA to Event Hubs) run
+*   **Managed Identities:** Ingestion connections (ACA to Eventstream) run
     passwordless using Azure Managed Identities.
 *   **Microsoft Purview integration:** Fabric automatically integrates with
-    Purview to capture end-to-end data lineage from Event Hubs to Power BI.
+    Purview to capture end-to-end data lineage from Eventstream to Power BI.
 
 ---
 
@@ -283,13 +270,10 @@ SaaS governance boundaries are maintained via native Microsoft Fabric systems:
 
 Pipeline operations are monitored at two separate tiers:
 
-### 7.1 Message Bus Observability (Azure Monitor)
-*   **Consumer Lag:** Tracked continuously. Triggers a **P1** incident if lag
-    grows continuously for more than 5 minutes.
-*   **DLQ Monitoring:** Triggers a **P1** alert if any message lands in the Dead
-    Letter Hub (`*.dlq`).
-*   **Throughput Alerting:** Triggers a **P2** warning if message volume drops
-    abruptly.
+### 7.1 Ingestion Observability (Eventstream Metrics)
+*   **Ingestion Drop:** Triggers a **P2** warning if incoming message volume drops
+    abruptly, indicating source issues.
+*   **Data Processed/Dropped:** Triggers a **P1** alert if Eventstream registers dropped events due to schema or parsing errors.
 
 ### 7.2 Fabric Operations Observability (Monitoring Hub)
 *   **Fabric Monitoring Hub:** All Spark streaming runs are monitored. Any run

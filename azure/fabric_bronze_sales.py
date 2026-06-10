@@ -11,8 +11,28 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, current_timestamp, to_date
 
-# Initialize Spark Session
-spark = SparkSession.builder.getOrCreate()
+# Initialize Spark Session with Balanced Streaming Profile
+spark = (
+    SparkSession.builder.appName("fabric_bronze_sales")
+    # 1. Flexible Cost Control (Bounded Dynamic Allocation)
+    .config("spark.dynamicAllocation.enabled", "true")
+    .config("spark.dynamicAllocation.minExecutors", "1")
+    .config("spark.dynamicAllocation.maxExecutors", "3")    # Safety ceiling
+    
+    # 2. Streaming State Optimization (RocksDB + Changelog Checkpointing)
+    .config("spark.sql.streaming.stateStore.providerClass", 
+            "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider")
+    .config("spark.sql.streaming.stateStore.rocksdb.changelogCheckpointing.enabled", "true")
+    
+    # 3. Small File Management (Fabric V-Order)
+    .config("spark.sql.parquet.vorder.enabled", "true")
+    .config("spark.microsoft.delta.optimizeWrite.enabled", "true")
+    
+    # 4. Compute Efficiency (AQE + Reduced Shuffle Partitions)
+    .config("spark.sql.adaptive.enabled", "true")
+    .config("spark.sql.shuffle.partitions", "16")
+    .getOrCreate()
+)
 
 # -----------------------------------------------------------------------------
 # 1. Connection Configurations

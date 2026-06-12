@@ -1,0 +1,136 @@
+# =============================================================================
+# databricks_jobs.yml
+# Databricks Asset Bundle (DAB) Configuration for Medallion Pipelines
+#
+# Configures:
+#   1. Always-on streaming jobs for Bronze and Silver.
+#   2. Scheduled incremental batch job for Gold (every 15 minutes).
+#   3. Cost-optimized clusters with dynamic scaling, Spot workers, and AQE.
+#   4. Global metadata tags for automated FinOps DBU cost tracking.
+# =============================================================================
+
+bundle:
+  name: medallion-sales-pipeline
+
+# -----------------------------------------------------------------------------
+# GLOBAL ENVIRONMENT TARGETS
+# -----------------------------------------------------------------------------
+targets:
+  prod:
+    workspace:
+      host: https://adb-prod-workspace.azuredatabricks.net
+
+# -----------------------------------------------------------------------------
+# WORKFLOW RESOURCES
+# -----------------------------------------------------------------------------
+resources:
+  jobs:
+    # -------------------------------------------------------------------------
+    # 1. BRONZE & SILVER STREAMING WORKFLOW
+    # -------------------------------------------------------------------------
+    databricks_sales_streaming_pipeline:
+      name: "Sales Real-Time Streaming (Bronze & Silver)"
+      
+      # Ensure the streaming job restarts on failures to maintain always-on state
+      continuous:
+        pause_status: UNPAUSED
+      
+      tasks:
+        # Task 1.1: Bronze Kafka Ingestion
+        - task_key: bronze_sales_ingestion
+          spark_python_task:
+            python_file: ./bronze_sales.py
+          new_cluster: &streaming_cluster_template
+            spark_version: "13.3.x-scala2.12"
+            node_type_id: "Standard_D4ds_v5" # General purpose worker
+            driver_node_type_id: "Standard_D4ds_v5"
+            
+            # Cost Optimization: Spot VMs for workers, On-Demand for driver
+            azure_attributes:
+              first_on_demand: 1
+              availability: "SPOT_WITH_FALLBACK_AZURE"
+            
+            # Dynamic Autoscaling (1-3 Workers)
+            autoscale:
+              min_workers: 1
+              max_workers: 3
+              
+            # Spark Optimization Config (AQE, RocksDB State Store)
+            spark_conf:
+              "spark.dynamicAllocation.enabled": "true"
+              "spark.dynamicAllocation.minExecutors": "1"
+              "spark.dynamicAllocation.maxExecutors": "3"
+              "spark.sql.streaming.stateStore.providerClass": "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider"
+              "spark.sql.streaming.stateStore.rocksdb.changelogCheckpointing.enabled": "true"
+              "spark.sql.adaptive.enabled": "true"
+              "spark.sql.adaptive.coalescePartitions.enabled": "true"
+              "spark.sql.adaptive.coalescePartitions.initialPartitionNum": "128"
+              "spark.sql.shuffle.partitions": "128"
+              "spark.kafka.bootstrap.servers": "{{secrets/kafka-credentials/bootstrap-servers}}"
+              "spark.kafka.sasl.username": "{{secrets/kafka-credentials/sasl-username}}"
+              "spark.kafka.sasl.password": "{{secrets/kafka-credentials/sasl-password}}"
+            
+            # Cluster Metadata Tagging (FinOps DBU Spend Tracking)
+            custom_tags:
+              quality: "bronze"
+              cost_center: "finance"
+              environment: "prod"
+              project: "revenue_reporting"
+              team: "data-engineering"
+
+        # Task 1.2: Silver Cleansing & Deduplication
+        - task_key: silver_sales_cleansing
+          depends_on:
+            - task_key: bronze_sales_ingestion
+          spark_python_task:
+            python_file: ./silver_sales.py
+          new_cluster:
+            <<: *streaming_cluster_template
+            custom_tags:
+              quality: "silver"
+              cost_center: "finance"
+              environment: "prod"
+              project: "revenue_reporting"
+              team: "data-engineering"
+
+    # -------------------------------------------------------------------------
+    # 2. GOLD BATCH AGGREGATION WORKFLOW (Scheduled)
+    # -------------------------------------------------------------------------
+    databricks_sales_gold_aggregation:
+      name: "Sales Daily Aggregation (Gold Batch)"
+      
+      # Run on a 15-minute cron schedule to aggregate incremental CDF updates
+      schedule:
+        quartz_cron_expression: "0 */15 * * * ?" # Every 15 minutes
+        timezone_id: "UTC"
+        pause_status: UNPAUSED
+        
+      tasks:
+        - task_key: gold_sales_aggregation
+          spark_python_task:
+            python_file: ./gold_sales.py
+          new_cluster:
+            spark_version: "13.3.x-scala2.12"
+            node_type_id: "Standard_E4ds_v5" # Memory-optimized cluster node
+            driver_node_type_id: "Standard_E4ds_v5"
+            
+            # Spot workers for cost savings (Runs for ~1 minute per schedule)
+            azure_attributes:
+              first_on_demand: 1
+              availability: "SPOT_AZURE"
+              
+            # Fixed sizing for short-lived batch executions (1 worker)
+            num_workers: 1
+            
+            spark_conf:
+              "spark.sql.adaptive.enabled": "true"
+              "spark.sql.adaptive.coalescePartitions.enabled": "true"
+              "spark.sql.adaptive.coalescePartitions.initialPartitionNum": "128"
+              "spark.sql.shuffle.partitions": "128"
+              
+            custom_tags:
+              quality: "gold"
+              cost_center: "finance"
+              environment: "prod"
+              project: "revenue_reporting"
+              team: "data-engineering"

@@ -28,7 +28,7 @@ resource "databricks_catalog" "this" {
 }
 
 # -----------------------------------------------------------------------------
-# 4. Create Medallion Schemas (Bronze, Silver, Gold)
+# 4. Create Medallion & Platform Schemas (Bronze, Silver, Gold, Observability)
 # -----------------------------------------------------------------------------
 resource "databricks_schema" "bronze" {
   catalog_name = databricks_catalog.this.id
@@ -47,3 +47,10 @@ resource "databricks_schema" "gold" {
   name         = "gold"
   comment      = "Gold schema containing daily business reporting aggregates"
 }
+
+resource "databricks_schema" "observability" {
+  catalog_name = databricks_catalog.this.id
+  name         = "observability"
+  comment      = "Observability schema containing execution metrics and monitoring tables"
+}
+

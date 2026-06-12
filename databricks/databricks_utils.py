@@ -13,7 +13,8 @@ from pyspark.sql.types import StructType, StructField, StringType, LongType, Tim
 
 # Default Unity Catalog Name
 CATALOG = "catalog"
-METRICS_TABLE = f"{CATALOG}.silver.pipeline_execution_metrics"
+METRICS_TABLE = f"{CATALOG}.observability.pipeline_execution_metrics"
+
 
 def get_spark_session(
     app_name: str, 
@@ -122,7 +123,7 @@ def log_metrics(
     metrics_df = spark.createDataFrame(data, schema)
     
     # Pre-create schemas if they don't exist
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.silver")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.observability")
     
     # Ensure metrics table exists in Unity Catalog
     spark.sql(f"""

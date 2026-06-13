@@ -252,7 +252,7 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int) -> None:
                   FROM ranked
                   WHERE rn = 1
                 ) AS source
-                ON target.order_id = source.order_id
+                ON target.order_id = source.order_id AND target.order_date = source.order_date
                 WHEN MATCHED AND source.updated_at > target.updated_at THEN
                   UPDATE SET *
                 WHEN NOT MATCHED THEN

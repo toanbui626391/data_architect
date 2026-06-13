@@ -117,7 +117,7 @@ def transform_bronze(stream_df: DataFrame) -> DataFrame:
             from_json(
                 col("record_content"), 
                 PAYLOAD_SCHEMA, 
-                {"rescuedDataColumn": "_rescued_data_"}
+                {"rescuedDataColumn": "_rescued_data"}
             ).alias("parsed"),
             "*"
         )
@@ -205,6 +205,7 @@ def process_bronze_batch(batch_df: DataFrame, batch_id: int) -> None:
             batch_df.write
             .format("delta")
             .mode("append")
+            .option("mergeSchema", "true")
             .saveAsTable(TARGET_TABLE)
         )
         

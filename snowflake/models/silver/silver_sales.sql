@@ -6,7 +6,7 @@ USE SCHEMA SILVER_SALES;
 -- Implements Silver Layer (Cleansed & Conformed) using Dynamic Tables
 -- Parses JSON fields, standardizes types, and deduplicates records
 CREATE OR REPLACE DYNAMIC TABLE SILVER_SALES_TRANSACTIONS
-    TARGET_LAG = 'DOWNSTREAM' -- Complies with Rule 3.1 (Use DOWNSTREAM for chained tables)
+    TARGET_LAG = '1 MINUTE' -- Set to near-realtime stream processing (1-minute latency)
     WAREHOUSE = 'COMPUTE_WH'
     AS
     SELECT

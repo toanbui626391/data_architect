@@ -7,7 +7,7 @@ USE SCHEMA GOLD_SALES;
 
 -- Freshness SLA: Updated within 15 minutes of Silver product table refresh (Rule 11 §1)
 CREATE OR REPLACE DYNAMIC TABLE DIM_PRODUCT
-    TARGET_LAG = '15 MINUTES'
+    TARGET_LAG = '12 HOURS' -- Set to schedule-based daily update cycle (12-hour refresh interval)
     WAREHOUSE = 'COMPUTE_WH'
     AS
     SELECT

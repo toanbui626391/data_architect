@@ -32,23 +32,23 @@ CREATE OR REPLACE ALERT ALERT_DYNAMIC_TABLE_FAILURES
 ALTER ALERT ALERT_DYNAMIC_TABLE_FAILURES RESUME;
 
 -- 3. P2 Alert: Gold table SLA breach — data stale beyond 3x TARGET_LAG (Rule 11 §1)
--- Fires if the FACT_SALES refresh timestamp is older than 45 minutes (3x 15-min lag).
+-- Fires if the FACT_SALES refresh timestamp is older than 36 hours (3x 12-hour scheduled lag).
 CREATE OR REPLACE ALERT ALERT_GOLD_SLA_BREACH
     WAREHOUSE = COMPUTE_WH
-    SCHEDULE = '15 MINUTE'
+    SCHEDULE = '60 MINUTE'
     IF (EXISTS (
         SELECT 1
         FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
         WHERE NAME = 'FACT_SALES'
           AND DATABASE_NAME = CURRENT_DATABASE()
-          AND DATA_TIMESTAMP < DATEADD('minute', -45, CURRENT_TIMESTAMP())
+          AND DATA_TIMESTAMP < DATEADD('hour', -36, CURRENT_TIMESTAMP())
         ORDER BY REFRESH_END_TIME DESC
         LIMIT 1
     ))
     THEN CALL SYSTEM$SEND_EMAIL(
         'data_eng_notifications',
-        'P2: FACT_SALES SLA Breach — table stale > 45 minutes',
-        'FACT_SALES has not refreshed within its 3x TARGET_LAG SLA window. Investigate warehouse sizing and upstream Silver health.'
+        'P2: FACT_SALES SLA Breach — table stale > 36 hours',
+        'FACT_SALES has not refreshed within its 3x TARGET_LAG SLA window of 36 hours. Investigate upstream Silver streaming and scheduler status.'
     );
 
 ALTER ALERT ALERT_GOLD_SLA_BREACH RESUME;
@@ -72,3 +72,22 @@ CREATE OR REPLACE ALERT ALERT_DYNAMIC_TABLE_FULL_REFRESH
     );
 
 ALTER ALERT ALERT_DYNAMIC_TABLE_FULL_REFRESH RESUME;
+
+-- 5. P1 Alert: Snowpipe Streaming Client Inactivity (Real-Time Ingestion Monitoring)
+-- Alerts when the count of active Snowpipe Streaming clients drops to 0, indicating Kafka Connector disconnect.
+CREATE OR REPLACE ALERT ALERT_STREAMING_CLIENT_HEALTH
+    WAREHOUSE = COMPUTE_WH
+    SCHEDULE = '10 MINUTE'
+    IF (EXISTS (
+        SELECT 1
+        FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWPIPE_STREAMING_CLIENT_HISTORY
+        WHERE NUM_ACTIVE_CLIENTS = 0
+          AND EVENT_TIMESTAMP >= DATEADD('minute', -10, CURRENT_TIMESTAMP())
+    ))
+    THEN CALL SYSTEM$SEND_EMAIL(
+        'data_eng_notifications',
+        'P1: Snowpipe Streaming Clients Inactive',
+        'Count of active Snowpipe Streaming clients dropped to 0 in the last 10 minutes. Check Kafka Connect Connector status immediately.'
+    );
+
+ALTER ALERT ALERT_STREAMING_CLIENT_HEALTH RESUME;

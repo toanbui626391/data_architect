@@ -6,7 +6,7 @@ USE SCHEMA GOLD_SALES;
 -- Implements Gold Layer Dimensional Data Modeling (Kimball)
 -- Freshness SLA: Updated within 15 minutes of Silver refresh (Rule 11 §1)
 CREATE OR REPLACE DYNAMIC TABLE DIM_CUSTOMER
-    TARGET_LAG = '15 MINUTES'
+    TARGET_LAG = '12 HOURS' -- Set to schedule-based daily update cycle (12-hour refresh interval)
     WAREHOUSE = 'COMPUTE_WH'
     AS
     SELECT

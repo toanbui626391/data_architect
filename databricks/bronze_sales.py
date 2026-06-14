@@ -216,7 +216,8 @@ def create_target_table(spark: SparkSession) -> None:
         "environment" = "prod",
         "project" = "revenue_reporting",
         "team" = "data-engineering",
-        "delta.autoOptimize.optimizeWrite" = "true"
+        "delta.autoOptimize.optimizeWrite" = "true",
+        "delta.autoOptimize.autoCompact" = "true"
       )
       CLUSTER BY (_ingested_date)
     """)

@@ -82,7 +82,8 @@ def create_silver_tables(spark: SparkSession) -> None:
         "project" = "revenue_reporting",
         "team" = "data-engineering",
         "delta.enableChangeDataFeed" = "true",
-        "delta.autoOptimize.optimizeWrite" = "true"
+        "delta.autoOptimize.optimizeWrite" = "true",
+        "delta.autoOptimize.autoCompact" = "true"
       )
       CLUSTER BY (order_date, store_id)
     """)
@@ -105,7 +106,8 @@ def create_silver_tables(spark: SparkSession) -> None:
         "environment" = "prod",
         "project" = "revenue_reporting",
         "team" = "data-engineering",
-        "delta.autoOptimize.optimizeWrite" = "true"
+        "delta.autoOptimize.optimizeWrite" = "true",
+        "delta.autoOptimize.autoCompact" = "true"
       )
       CLUSTER BY (_ingested_at)
     """)

@@ -53,6 +53,10 @@ def get_spark_session(
     spark.conf.set("spark.sql.adaptive.localShuffleReader.enabled", "true")
     spark.conf.set("spark.sql.shuffle.partitions", "128")
     
+    # 4. Delta Lake Small Files & Compaction Tuning (Auto Optimize & Auto Compact)
+    spark.conf.set("spark.databricks.delta.properties.defaults.autoOptimize.optimizeWrite", "true")
+    spark.conf.set("spark.databricks.delta.properties.defaults.autoOptimize.autoCompact", "true")
+    
     return spark
 
 
@@ -148,7 +152,8 @@ def log_metrics(
         "environment" = "prod",
         "project" = "revenue_reporting",
         "team" = "data-engineering",
-        "delta.autoOptimize.optimizeWrite" = "true"
+        "delta.autoOptimize.optimizeWrite" = "true",
+        "delta.autoOptimize.autoCompact" = "true"
       )
       CLUSTER BY (job_name, timestamp)
     """)

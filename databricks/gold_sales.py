@@ -56,7 +56,8 @@ def create_gold_table(spark: SparkSession) -> None:
         "project" = "revenue_reporting",
         "team" = "data-engineering",
         "delta.enableChangeDataFeed" = "true",
-        "delta.autoOptimize.optimizeWrite" = "true"
+        "delta.autoOptimize.optimizeWrite" = "true",
+        "delta.autoOptimize.autoCompact" = "true"
       )
       CLUSTER BY (order_date)
     """)

@@ -66,6 +66,8 @@ resources:
               "spark.sql.adaptive.coalescePartitions.enabled": "true"
               "spark.sql.adaptive.coalescePartitions.initialPartitionNum": "128"
               "spark.sql.shuffle.partitions": "128"
+              "spark.databricks.delta.properties.defaults.autoOptimize.optimizeWrite": "true"
+              "spark.databricks.delta.properties.defaults.autoOptimize.autoCompact": "true"
               "spark.kafka.bootstrap.servers": "{{secrets/kafka-credentials/bootstrap-servers}}"
               "spark.kafka.sasl.username": "{{secrets/kafka-credentials/sasl-username}}"
               "spark.kafka.sasl.password": "{{secrets/kafka-credentials/sasl-password}}"
@@ -127,6 +129,8 @@ resources:
               "spark.sql.adaptive.coalescePartitions.enabled": "true"
               "spark.sql.adaptive.coalescePartitions.initialPartitionNum": "128"
               "spark.sql.shuffle.partitions": "128"
+              "spark.databricks.delta.properties.defaults.autoOptimize.optimizeWrite": "true"
+              "spark.databricks.delta.properties.defaults.autoOptimize.autoCompact": "true"
               
             custom_tags:
               quality: "gold"

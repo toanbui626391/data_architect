@@ -4,6 +4,7 @@ USE SCHEMA GOLD_SALES;
 
 -- Create Dimension Dynamic Table (SCD Type 1 - Latest State)
 -- Implements Gold Layer Dimensional Data Modeling (Kimball)
+-- Freshness SLA: Updated within 15 minutes of Silver refresh (Rule 11 §1)
 CREATE OR REPLACE DYNAMIC TABLE DIM_CUSTOMER
     TARGET_LAG = '15 MINUTES'
     WAREHOUSE = 'COMPUTE_WH'
@@ -19,3 +20,7 @@ CREATE OR REPLACE DYNAMIC TABLE DIM_CUSTOMER
         CURRENT_TIMESTAMP() AS _gold_updated_at
     FROM SILVER_SALES.SILVER_SALES_TRANSACTIONS
     GROUP BY customer_id;
+
+-- RBAC Grants (Rule 08 §1: Gold is strictly BI_READ_ROLE)
+GRANT USAGE ON SCHEMA GOLD_SALES TO ROLE BI_READ_ROLE;
+GRANT SELECT ON DYNAMIC TABLE DIM_CUSTOMER TO ROLE BI_READ_ROLE;

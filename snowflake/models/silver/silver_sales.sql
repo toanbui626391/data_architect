@@ -17,10 +17,11 @@ CREATE OR REPLACE DYNAMIC TABLE SILVER_SALES_TRANSACTIONS
         RAW_DATA:amount::NUMBER(10,2) AS amount,
         RAW_DATA:status::VARCHAR AS status,
         _FILE_NAME,
-        _LOAD_TIMESTAMP
+        _ingested_at AS _bronze_ingested_at,
+        CURRENT_TIMESTAMP() AS _silver_processed_at
     FROM RAW_SALES.VW_BRONZE_SALES -- Complies with Rule 3.3 (Read from View Abstraction)
     -- Simple deduplication taking the most recently loaded record per transaction
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY RAW_DATA:transaction_id::VARCHAR 
-        ORDER BY _LOAD_TIMESTAMP DESC
+        ORDER BY _ingested_at DESC
     ) = 1;

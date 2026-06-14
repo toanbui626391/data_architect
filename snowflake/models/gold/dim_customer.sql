@@ -15,6 +15,7 @@ CREATE OR REPLACE DYNAMIC TABLE DIM_CUSTOMER
         -- Here we extract unique customer profiles available in the sales transactions.
         MAX(transaction_date) AS last_purchase_date,
         COUNT(transaction_id) AS lifetime_transactions,
-        SUM(amount) AS lifetime_value
+        SUM(amount) AS lifetime_value,
+        CURRENT_TIMESTAMP() AS _gold_updated_at
     FROM SILVER_SALES.SILVER_SALES_TRANSACTIONS
     GROUP BY customer_id;

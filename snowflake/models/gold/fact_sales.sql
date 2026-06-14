@@ -16,6 +16,7 @@ CREATE OR REPLACE DYNAMIC TABLE FACT_SALES
         MD5(t.product_id) AS product_sk,   -- Foreign Key to DIM_PRODUCT (not implemented here)
         t.transaction_date,
         t.amount,
-        t.status
+        t.status,
+        CURRENT_TIMESTAMP() AS _gold_updated_at
     FROM SILVER_SALES.SILVER_SALES_TRANSACTIONS t
     WHERE t.status = 'COMPLETED'; -- Only include completed transactions in the fact table

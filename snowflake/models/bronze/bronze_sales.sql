@@ -52,3 +52,8 @@ CREATE OR REPLACE TASK QUARANTINE_SALES_TASK
     -- In practice, a more sophisticated DLQ collection using COPY_HISTORY is used.
 
 ALTER TASK QUARANTINE_SALES_TASK RESUME;
+
+-- 5. Create View Abstraction Layer for Dynamic Tables (Rule 3.3)
+-- Prevents schema changes on the source table from breaking downstream Dynamic Tables
+CREATE OR REPLACE VIEW VW_BRONZE_SALES AS
+SELECT * FROM BRONZE_SALES;

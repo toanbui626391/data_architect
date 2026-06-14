@@ -8,7 +8,7 @@ USE SCHEMA RAW_SALES;
 CREATE OR REPLACE TABLE BRONZE_PRODUCTS (
     RECORD_CONTENT VARIANT,
     RECORD_METADATA VARIANT
-);
+) ENABLE_SCHEMA_EVOLUTION = TRUE;
 
 -- 2. View Abstraction Layer for Dynamic Tables (Rule 18 §3.3)
 -- Transforms Kafka metadata and content into conformed schemas for downstream layers.

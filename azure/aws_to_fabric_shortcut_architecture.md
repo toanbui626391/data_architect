@@ -88,8 +88,21 @@ This is strictly reserved for operational dashboards and event-driven automation
 2.  **Cross-Cloud Push:** Debezium pushes Avro-serialized events directly to the Azure Event Hubs Kafka endpoint over the internet.
 3.  **Streaming Ingestion:** A Fabric Spark Structured Streaming job runs continuously, pulling the events from Event Hubs and appending them to the Bronze Delta tables.
 
-## 5. Unified Cross-Cloud Security
-Regardless of the ingestion path chosen, **hardcoded AWS Access Keys are strictly forbidden.**
-*   **OIDC Federation:** Both paths rely on OpenID Connect (OIDC). Azure Entra ID (Managed Identities) exchanges short-lived tokens with AWS IAM.
-*   *Path A:* Fabric uses OIDC to securely read the S3 bucket using temporary credentials.
-*   *Path B:* The AWS CDC publisher uses OIDC/OAuth to authenticate to the Azure Event Hubs endpoint securely over TLS.
+## 5. Unified Cross-Cloud Security (OIDC Federation)
+
+To achieve enterprise-grade security and eliminate the risk of leaked credentials, this architecture strictly forbids the use of long-lived static keys (e.g., AWS Access Keys or Azure Connection Strings). Instead, it implements a **Zero-Secret Trust** model using **OpenID Connect (OIDC) Federation**.
+
+### 5.1 Securing Path A: Azure Fabric Reading AWS S3
+*   **Identity Provider Setup:** AWS IAM is configured to recognize Azure Entra ID as a trusted OIDC Identity Provider (IdP).
+*   **Role Configuration:** An AWS IAM Role (e.g., `Fabric-S3-Reader`) is created with read-only access to the target S3 bucket. A trust policy is applied ensuring *only* a specific Azure Managed Identity can assume this role.
+*   **The Handshake:** When Fabric accesses the S3 Shortcut, it requests an identity token from Entra ID and passes it to AWS. AWS cryptographically verifies the token and issues temporary STS (Security Token Service) credentials that expire automatically, granting Fabric secure access to the data.
+
+### 5.2 Securing Path B: AWS Publisher Writing to Azure Event Hubs
+*   **Workload Identity Federation:** Azure Entra ID is configured with an App Registration that explicitly trusts specific AWS IAM roles via Workload Identity Federation.
+*   **Role Assignment:** The App Registration is assigned the `Azure Event Hubs Data Sender` role via Azure RBAC.
+*   **The Handshake:** The AWS CDC publisher fetches an AWS identity token and exchanges it with Entra ID for an Azure OAuth access token. The publisher then authenticates to the Event Hubs Kafka endpoint using `SASL/OAUTHBEARER` instead of a static SASL/PLAIN connection string.
+
+### 5.3 Architectural Benefits
+1.  **Zero Hardcoded Secrets:** Codebases and CI/CD pipelines are entirely free of passwords.
+2.  **Blast Radius Containment:** Because STS and OAuth tokens expire rapidly (typically in 60 minutes), intercepted tokens quickly become useless.
+3.  **Cross-Cloud Traceability:** Access logs in both AWS CloudTrail and Azure Monitor perfectly capture the exact identities performing actions, ensuring strict compliance with security audits.

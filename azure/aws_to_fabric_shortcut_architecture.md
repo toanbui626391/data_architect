@@ -1,15 +1,17 @@
-# AWS to Microsoft Fabric: Virtual Lakehouse Architecture
+# AWS to Microsoft Fabric: Bi-Modal (Hybrid) Data Architecture
 
 ## 1. Executive Summary
 
-This document defines the architectural pattern for seamlessly and securely onboarding data from **Amazon Web Services (AWS)** into **Microsoft Fabric (Azure)**. 
+This document defines a **Bi-Modal (Hybrid) Architecture** for integrating data from **Amazon Web Services (AWS)** into **Microsoft Fabric (Azure)**. 
 
-To mitigate the high network egress costs and operational complexity of cross-cloud ETL pipelines, this design employs the **Fabric OneLake Shortcut (Virtual Lakehouse)** pattern. Data is extracted locally within AWS, stored in open table formats (Delta/Parquet), and virtualized into Fabric. Data transfer only occurs dynamically during downstream read operations.
+To balance the conflicting goals of "easy, frictionless onboarding" and "low-latency real-time processing," this architecture provides two distinct cross-cloud ingestion paths:
+*   **Path A (The Default - 80% of data):** A zero-ETL virtual lakehouse approach using Fabric S3 Shortcuts. This is optimized for massive scale, minimal engineering overhead, and instantaneous cross-cloud onboarding.
+*   **Path B (The Exception - 20% of data):** A Centralized Message Bus approach using Azure Event Hubs. This is optimized for strict sub-minute latency and high-throughput operational event streams.
 
 ## 2. Architecture Diagram
 
 ```mermaid
-flowchart LR
+flowchart TD
     %% Styles
     classDef aws fill:#ff9900,stroke:#d07b00,stroke-width:2px,color:#000;
     classDef azure fill:#0078d4,stroke:#005a9e,stroke-width:2px,color:#fff;
@@ -17,60 +19,77 @@ flowchart LR
 
     subgraph AWS [AWS Environment]
         direction TB
-        RDS[("Source DB<br>(RDS/Aurora)")]
-        DMS["AWS DMS / Glue<br>(Local Extraction)"]
-        S3[("AWS S3 Bucket<br>(Delta/Parquet Format)")]
+        SourceDB[("Source Database<br>&#40;RDS/Aurora/Dynamo&#41;")]
+        
+        %% Path A Extraction
+        Glue["AWS Glue / DMS<br>&#40;Batch Export&#41;"]
+        S3[("AWS S3 Bucket<br>&#40;Delta/Parquet&#41;")]
+        
+        %% Path B Extraction
+        CDC["CDC Publisher<br>&#40;Debezium&#41;"]
 
-        RDS --> DMS --> S3
+        SourceDB -->|Hourly/Daily| Glue --> S3
+        SourceDB -->|Continuous Binlog| CDC
     end
 
     subgraph Fabric [Microsoft Fabric / Azure]
         direction TB
-        Shortcut[/"OneLake S3 Shortcut<br>(Virtual Mount)"/]
-        Bronze[("raw_lakehouse<br>(Bronze Layer)")]
-        Spark["Fabric Spark / SQL<br>(Silver/Gold Processing)"]
-        PowerBI["Power BI<br>(Direct Lake)"]
+        
+        %% Path A Integration
+        Shortcut[/"OneLake S3 Shortcut<br>&#40;Virtual Mount&#41;"/]
+        
+        %% Path B Integration
+        EventHubs[("Azure Event Hubs<br>&#40;Central Message Bus&#41;")]
+        SparkStream["Fabric Spark<br>Structured Streaming"]
 
+        %% Bronze
+        Bronze[("raw_lakehouse<br>&#40;Bronze Delta Tables&#41;")]
+        SparkBatch["Fabric Spark SQL<br>&#40;Silver/Gold Transform&#41;"]
+        PowerBI["Power BI<br>&#40;Direct Lake&#41;"]
+        
+        %% Connections
         Shortcut --> Bronze
-        Bronze -- "Data Egress on Read" --> Spark
-        Spark --> PowerBI
+        EventHubs --> SparkStream --> Bronze
+        Bronze --> SparkBatch --> PowerBI
     end
 
-    %% Security Control Plane
-    EntraID["Azure Entra ID<br>(Managed Identity)"]
-    IAM["AWS IAM<br>(OIDC Trust Role)"]
-    EntraID -.->|Assumes Role| IAM
-    IAM -.->|Grants Access| Shortcut
+    %% Cross-Cloud Transit
+    S3 -.->|Path A: Zero-Copy Virtual Link<br>&#40;OIDC Auth&#41;| Shortcut
+    CDC -.->|Path B: SASL/TLS Push<br>&#40;Real-Time Transit&#41;| EventHubs
 
-    %% Connection
-    S3 -.->|No-Copy Virtual Link| Shortcut
-    
-    class RDS,DMS,S3 aws;
-    class Shortcut,Bronze,Spark,PowerBI azure;
-    class EntraID,IAM transit;
+    class SourceDB,Glue,S3,CDC aws;
+    class Shortcut,EventHubs,SparkStream,Bronze,SparkBatch,PowerBI azure;
 ```
 
-## 3. Step-by-Step Implementation Flow
+## 3. The Onboarding Matrix (When to use which?)
 
-### 3.1 Step 1: Local Data Landing (AWS)
-*   **Action:** Extract raw transactional data from AWS databases (e.g., Aurora, RDS, DynamoDB) using AWS-native tools like **AWS DMS (Data Migration Service)** or **AWS Glue**.
-*   **Format:** The data must be written locally to an **AWS S3 Bucket** in an open format, strictly **Delta Lake** or **Parquet**. 
-*   **Benefit:** Keeps the heavy lifting and initial extraction within the AWS network, preventing massive outbound data transfer costs.
+To prevent over-engineering, Data Architects must enforce the following decision matrix when onboarding a new AWS data source:
 
-### 3.2 Step 2: Cross-Cloud Security (OIDC Trust)
-*   **Action:** Establish a federated trust relationship. Configure an **AWS IAM Role** that trusts an **Azure Entra ID (Active Directory)** App Registration or Managed Identity via OpenID Connect (OIDC).
-*   **Benefit:** Eliminates the need to generate, share, and rotate static AWS Access Keys. Fabric accesses S3 using short-lived, dynamically generated tokens, satisfying stringent enterprise security requirements.
+| Criteria | Path A: S3 Shortcuts (Virtual Lakehouse) | Path B: Azure Event Hubs (Message Bus) |
+| :--- | :--- | :--- |
+| **Primary Goal** | **Easy, frictionless onboarding.** | **Sub-minute, real-time latency.** |
+| **Data Volume** | Petabytes of historical batch data. | Continuous, high-velocity small payloads. |
+| **Latency SLA** | Hourly or Daily (T+1). | Real-Time (Seconds to Minutes). |
+| **Engineering Effort** | **Very Low.** (Click-to-mount UI). | **High.** (Requires CDC setup, Avro schemas, Spark code). |
+| **Egress Costs** | Optimized (Only pulled when queried). | Optimized (Highly compressed binary streams). |
+| **Resilience** | High (S3 is the system of record). | High (Broker buffering & Dead Letter Queues). |
 
-### 3.3 Step 3: Virtualization (Fabric Shortcuts)
-*   **Action:** Within the Fabric `raw_lakehouse` (Bronze layer), create a new **Amazon S3 Shortcut**. Input the target S3 URI and the trusted AWS IAM Role ARN.
-*   **Result:** The AWS S3 bucket instantly appears as a local folder inside OneLake. If the data is in Delta format, Fabric automatically recognizes it as a managed Bronze table. **Zero bytes are copied during this setup phase.**
+## 4. Implementation Details
 
-### 3.4 Step 4: Downstream Processing (Fabric Spark)
-*   **Action:** Fabric Data Engineering workloads (PySpark or T-SQL) query the virtual Bronze table to perform deduplication, cleansing, and Kimball Star Schema modeling into the Silver and Gold layers.
-*   **Result:** Data is only pulled across the internet (triggering AWS egress fees) exactly when the Spark engine executes a read. Because Spark queries against Delta Lake utilize partition pruning, only the specific required files are downloaded, minimizing egress costs.
+### 4.1 Path A: The Easy Onboarding Flow (S3 Shortcuts)
+This is the default path for analytical workloads, historical reporting, and machine learning training datasets.
+1.  **Extract Locally:** AWS natively dumps table data or system logs into an AWS S3 bucket formatted strictly as Delta Lake or Parquet.
+2.  **Virtual Mount:** A Data Analyst or Engineer navigates to the Fabric Bronze Lakehouse, selects "New Shortcut -> Amazon S3", and inputs the S3 URI.
+3.  **Result:** The table is instantly available for querying in Fabric. No cross-cloud ETL pipelines are built, scheduled, or monitored.
 
-## 4. Architectural Principles Addressed
+### 4.2 Path B: The Real-Time Flow (Event Hubs)
+This is strictly reserved for operational dashboards and event-driven automation (e.g., live inventory tracking, fraud detection).
+1.  **CDC Extraction:** AWS Debezium captures database row changes in real-time from the transaction log.
+2.  **Cross-Cloud Push:** Debezium pushes Avro-serialized events directly to the Azure Event Hubs Kafka endpoint over the internet.
+3.  **Streaming Ingestion:** A Fabric Spark Structured Streaming job runs continuously, pulling the events from Event Hubs and appending them to the Bronze Delta tables.
 
-1.  **Cost Optimization (Egress Minimization):** By storing data locally in AWS and utilizing partition-aware queries from Fabric, you avoid "lift-and-shift" batch pipelines that copy terabytes of redundant historical data daily.
-2.  **Open Formats / No Vendor Lock-in:** By mandating Delta Lake or Parquet on AWS S3, the data remains accessible to AWS-native tools (like Athena or SageMaker) while simultaneously powering Fabric analytics.
-3.  **Operational Simplicity:** You do not need to schedule, monitor, or debug cross-cloud data movement pipelines (e.g., Azure Data Factory copy activities). The infrastructure acts as the pipeline.
+## 5. Unified Cross-Cloud Security
+Regardless of the ingestion path chosen, **hardcoded AWS Access Keys are strictly forbidden.**
+*   **OIDC Federation:** Both paths rely on OpenID Connect (OIDC). Azure Entra ID (Managed Identities) exchanges short-lived tokens with AWS IAM.
+*   *Path A:* Fabric uses OIDC to securely read the S3 bucket using temporary credentials.
+*   *Path B:* The AWS CDC publisher uses OIDC/OAuth to authenticate to the Azure Event Hubs endpoint securely over TLS.

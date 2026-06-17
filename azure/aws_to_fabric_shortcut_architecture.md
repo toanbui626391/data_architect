@@ -53,12 +53,25 @@ flowchart TD
         Bronze --> SparkBatch --> PowerBI
     end
 
-    %% Cross-Cloud Transit
-    S3 -.->|Path A: Zero-Copy Virtual Link<br>&#40;OIDC Auth&#41;| Shortcut
-    CDC -.->|Path B: SASL/TLS Push<br>&#40;Real-Time Transit&#41;| EventHubs
+    subgraph SecurityControlPlane [Unified Cross-Cloud Security]
+        direction LR
+        AWSIAM["AWS IAM<br>&#40;OIDC IdP&#41;"]
+        EntraID["Azure Entra ID<br>&#40;Managed Identity&#41;"]
+        
+        AWSIAM <-->|"OIDC Federated Trust<br>&#40;No Static Keys&#41;"| EntraID
+    end
 
-    class SourceDB,Glue,S3,CDC aws;
-    class Shortcut,EventHubs,SparkStream,Bronze,SparkBatch,PowerBI azure;
+    %% Cross-Cloud Transit
+    S3 -.->|"Path A: Zero-Copy Virtual Link"| Shortcut
+    CDC -.->|"Path B: SASL/TLS Push"| EventHubs
+    
+    %% Security Integrations
+    Shortcut -.->|"Auth via Token"| EntraID
+    CDC -.->|"Auth via Token"| AWSIAM
+
+    class SourceDB,Glue,S3,CDC,AWSIAM aws;
+    class Shortcut,EventHubs,SparkStream,Bronze,SparkBatch,PowerBI,EntraID azure;
+    class SecurityControlPlane transit;
 ```
 
 ## 3. The Onboarding Matrix (When to use which?)

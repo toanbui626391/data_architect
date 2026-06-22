@@ -1,6 +1,6 @@
 # Centralized Message Bus Rules
 
-The message bus is the **backbone of all real-time data ingestion**. All streaming architectures MUST adhere to these standards. For general network/security rules see Rule 09; for alerting standards see Rule 11.
+The message bus is the **backbone of all real-time data ingestion**. All streaming architectures MUST adhere to these standards, driven by the "Smart Consumer, Dumb Broker" philosophy. For general network/security rules see Rule 09; for alerting standards see Rule 11.
 
 ---
 
@@ -10,7 +10,10 @@ The message bus is the **backbone of all real-time data ingestion**. All streami
 *   **No Custom Producers:** Standardize on Kafka Connect connectors (Debezium for CDC, JDBC for databases, SaaS connectors for APIs). Write custom producer code only when no mature connector exists.
 *   **Topic Naming Convention:** Topics MUST follow `{source}.{entity}.{version}` (e.g., `crm.sales_orders.v1`). Version the topic on breaking schema changes; never alter a live topic's schema in place.
 *   **Partitioning:** Partition topics by the primary entity key (e.g., `order_id`) to ensure ordered delivery per entity and enable consumer parallelism.
-*   **KRaft Metadata Quorum:** Production Kafka clusters MUST utilize KRaft (Kafka Raft) for metadata management. ZooKeeper coordination is strictly forbidden.
+*   **KRaft Metadata Quorum:** Production Kafka clusters MUST utilize KRaft
+    (Kafka Raft) for metadata management. ZooKeeper is strictly forbidden.
+    Dedicated controller nodes (minimum 3) MUST be isolated from broker
+    data nodes in production to prevent resource starvation.
 
 ---
 
@@ -30,6 +33,7 @@ The message bus is the **backbone of all real-time data ingestion**. All streami
 *   **Error Classification:** Classify failures as transient (network blips, temporary unavailability) or permanent (schema mismatch, malformed payload). Retry transient failures with exponential backoff before routing to DLQ. Route permanent failures directly to DLQ.
 *   **DLQ Message Enrichment:** DLQ messages MUST include metadata headers: original topic, partition, offset, error message, and failing application version. Never store raw payloads alone.
 *   **DLQ Alerting:** A DLQ message count > 0 is never acceptable in steady state. Any DLQ message MUST trigger an immediate P1 alert (per Rule 11).
+*   **DLQ Reprocessing Plan:** A DLQ is useless without a reprocessing strategy. Every pipeline MUST document and implement a mechanism (e.g., a replay script or specialized consumer) to inspect, fix, and resubmit valid messages from the DLQ back into the production stream.
 
 ---
 
@@ -38,7 +42,13 @@ The message bus is the **backbone of all real-time data ingestion**. All streami
 *   **Authentication & Encryption:** All producers and consumers MUST authenticate via SASL/SCRAM or mTLS. All traffic encrypted in transit via TLS 1.2+. At-rest encryption per Rule 09.
 *   **Zero Data Loss Guarantees:** Producers MUST use `acks=all` and `enable.idempotence=true`. Messages must be fully committed to all replicas before acknowledging success.
 *   **Consumer Idempotency:** All consumers MUST be idempotent. Processing the same event multiple times must produce the same result. Use deterministic `MERGE` keys or deduplication windows.
-*   **Network Isolation:** The message bus MUST reside within a private network (VNet/VPC). External sources connect via PrivateLink or secure NAT gateways (per Rule 09).
+*   **Network Isolation:** The message bus MUST reside within a private network
+    (VNet/VPC). External sources connect via PrivateLink or secure NAT gateways
+    (per Rule 09).
+*   **Disaster Recovery (DR):** All critical production topics MUST configure
+    multi-region asynchronous replication (e.g., via MirrorMaker 2 or Cluster
+    Linking). Establish clear, documented RPO and RTO SLA targets, and run
+    automated failover recovery drills bi-annually.
 
 ---
 
@@ -56,5 +66,24 @@ The message bus is the **backbone of all real-time data ingestion**. All streami
 *   **Retention & Tiered Storage:** Minimum 7-day topic retention. For retention requirements beyond 7 days, enable Tiered Storage to offload historical segments to cloud object storage.
 *   **Replication Factor:** All production topics MUST use replication factor ≥ 3.
 *   **Consumer Group Isolation:** Each pipeline MUST use a unique consumer group ID. Never share consumer groups across pipelines.
-*   **Producer Performance Tuning:** Enforce compression (`zstd` or `snappy`) and tune `linger.ms` (e.g., 5-10ms) on producers to maximize batch efficiency and reduce network overhead.
-*   **Infrastructure as Code:** All topics, connectors, schemas, and ACLs MUST be provisioned via IaC (Terraform). Manual creation is strictly forbidden.
+*   **Producer Performance Tuning:** Enforce compression (`zstd` or `snappy`)
+    and tune `linger.ms` (e.g., 5-10ms) on producers to maximize batch
+    efficiency and reduce network overhead.
+*   **Client Quotas & Rate Limiting:** Enforce tenant-level client quotas to
+    prevent "noisy neighbor" resource starvation. Limit producer/consumer
+    byte rates and request handler percentages at the principal level.
+*   **Topic Lifecycle & Zombie Pruning:** Implement automated topic cleanup
+    policies. Topics with zero production or consumption activity for >90
+    days MUST be flagged, archived, and deprecated/deleted via IaC.
+*   **Infrastructure as Code:** All topics, connectors, schemas, and ACLs
+    MUST be provisioned via IaC (Terraform). Manual creation is forbidden.
+
+---
+
+## Anti-Patterns ("Do Not Do" Rules)
+
+*   **Do NOT Share DLQs:** Never use a single, global DLQ topic for the entire cluster. This creates a data swamp that is impossible to debug. Enforce one DLQ per source topic or domain.
+*   **Do NOT Alter Live Topic Schemas:** Never bypass the Schema Registry to alter a schema in-place if it introduces a breaking change. Always version the topic (e.g., migrate from `v1` to `v2`).
+*   **Do NOT Swallow Errors:** Never silently drop messages that fail parsing or processing. If it cannot be processed, it must be retried or routed to a DLQ.
+*   **Do NOT Use ZooKeeper:** New Kafka deployments MUST use KRaft. ZooKeeper is deprecated and forbidden.
+*   **Do NOT Share Consumer Groups:** Multiple distinct pipelines MUST NOT use the same consumer group ID, as this causes them to steal messages from each other.

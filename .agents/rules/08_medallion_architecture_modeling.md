@@ -7,6 +7,7 @@ All Databricks Lakehouse pipelines MUST follow the Medallion Architecture (Bronz
 ## 1. Cross-Layer Requirements
 
 *   **Idempotency:** Every pipeline must be fully idempotent. Re-running must never cause data loss or duplication. Use DLT streaming checkpoints or deterministic `MERGE` keys.
+*   **Delta Lake Mandatory:** All tables across all layers MUST be stored in Delta Lake format to guarantee ACID transactions and enable time travel.
 *   **Separation of Concerns:** Never mix ingestion, cleansing, or aggregation logic in a single model. Each layer has one responsibility.
 *   **Naming Convention:** All tables MUST use the fully qualified Unity Catalog path: `catalog.{layer}.{entity}` (e.g., `catalog.bronze.sales_orders`). Never use implicit schema references.
 *   **Storage Optimization:** Use Liquid Clustering (`CLUSTER BY`) on all Delta tables (per Rule 07). Enable Row Tracking (`"delta.enableRowTracking" = "true"`) on Silver and Gold tables to optimize incremental Materialized Views.
@@ -31,6 +32,7 @@ All Databricks Lakehouse pipelines MUST follow the Medallion Architecture (Bronz
 *   **CDF:** Disable Change Data Feed (`"delta.enableChangeDataFeed" = "false"`). Bronze is append-only; Silver uses `APPLY CHANGES INTO` for CDC.
 *   **Payload:** Always retain the raw payload (e.g., `CAST(value AS STRING) AS record_content`). Extracting known columns alongside is acceptable, but the raw string must be preserved for schema drift recovery.
 *   **Data Quality:** Apply **only structural constraints** on ingestion metadata (e.g., `kafka_offset IS NOT NULL`). Use `ON VIOLATION WARN` exclusively. **Never drop records or apply business logic in Bronze.**
+*   **Retention:** Bronze acts as the historical archive. Configure Delta Time Travel retention (`delta.deletedFileRetentionDuration`) to a minimum of 30 days to allow for pipeline replay and recovery.
 
 ---
 
@@ -59,3 +61,12 @@ All Databricks Lakehouse pipelines MUST follow the Medallion Architecture (Bronz
 *   **Source Filter:** Always filter out semantically invalid states (e.g., `WHERE order_status IN ('COMPLETED', 'SHIPPED')`).
 *   **AI/ML Readiness:** Gold tables serving ML Feature Stores or AI inference MUST support point-in-time lookups via `_gold_updated_at` for training data reproducibility.
 *   **Data Quality:** Apply **semantic business constraints** using `ON VIOLATION WARN` (e.g., `total_revenue >= 0`). Failures indicate upstream logic bugs, not ingestion errors.
+
+---
+
+## Anti-Patterns ("Do Not Do" Rules)
+
+*   **Do NOT Overwrite Bronze:** The Bronze layer must be strictly append-only. Never use `MERGE` or `UPDATE` in Bronze. If a source record changes, append the new version.
+*   **Do NOT Apply Business Logic in Silver:** Silver is for structural cleansing (casting, deduplication, standardizing nulls). Do NOT calculate metrics or apply business rules here; that belongs in Gold.
+*   **Do NOT Skip Layers:** Never read directly from Bronze to build a Gold table. You must pass through the Silver layer to ensure deduplication and data quality are applied centrally.
+*   **Do NOT Silently Drop Data:** If a record fails validation in Silver, it MUST be routed to a quarantine table. Dropping data without an audit trail is strictly forbidden.

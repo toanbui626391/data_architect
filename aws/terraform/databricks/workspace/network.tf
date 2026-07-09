@@ -138,6 +138,25 @@ resource "aws_vpc_endpoint" "s3" {
 }
 
 # -----------------------------------------------------------------------------
+# 5b. VPC Interface Endpoint (STS)
+# Databricks requires STS for IAM role assumption. Without this endpoint,
+# STS calls route through the NAT Gateway, adding latency and cost.
+# -----------------------------------------------------------------------------
+resource "aws_vpc_endpoint" "sts" {
+  vpc_id              = aws_vpc.databricks_vpc.id
+  service_name        = "com.amazonaws.${var.aws_region}.sts"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private_subnets[*].id
+  security_group_ids  = [aws_security_group.databricks_sg.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name        = "${var.project_name}-sts-vpc-endpoint"
+    Environment = var.environment
+  }
+}
+
+# -----------------------------------------------------------------------------
 # 6. Databricks Default Security Group
 # -----------------------------------------------------------------------------
 # Requires rules permitting internal communication between master and worker nodes.
